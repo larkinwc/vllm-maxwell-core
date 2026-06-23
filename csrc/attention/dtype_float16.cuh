@@ -150,7 +150,13 @@ inline __device__ uint32_t float2_to_half2(float2 f) {
 inline __device__ uint16_t add(uint16_t a, uint16_t b) {
   uint16_t c;
 #ifndef USE_ROCM
+  #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 530
+  // Maxwell (sm_50/sm_52): no native fp16 ALU (add.f16 needs sm_53+).
+  // Emulate via fp32: convert up, add, convert back.
+  c = float_to_half(half_to_float(a) + half_to_float(b));
+  #else
   asm volatile("add.f16 %0, %1, %2;\n" : "=h"(c) : "h"(a), "h"(b));
+  #endif
 #else
   asm volatile("v_add_f16 %0, %1, %2;\n" : "=v"(c) : "v"(a), "v"(b));
 #endif
@@ -160,7 +166,14 @@ inline __device__ uint16_t add(uint16_t a, uint16_t b) {
 inline __device__ uint32_t add(uint32_t a, uint32_t b) {
   uint32_t c;
 #ifndef USE_ROCM
+  #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 530
+  // Maxwell: emulate packed half2 add via fp32.
+  float2 fa = half2_to_float2(a);
+  float2 fb = half2_to_float2(b);
+  c = float2_to_half2(make_float2(fa.x + fb.x, fa.y + fb.y));
+  #else
   asm volatile("add.f16x2 %0, %1, %2;\n" : "=r"(c) : "r"(a), "r"(b));
+  #endif
 #else
   asm volatile("v_pk_add_f16 %0, %1, %2;\n" : "=v"(c) : "v"(a), "v"(b));
 #endif
@@ -209,7 +222,12 @@ template <>
 inline __device__ uint16_t mul(uint16_t a, uint16_t b) {
   uint16_t c;
 #ifndef USE_ROCM
+  #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 530
+  // Maxwell: emulate half mul via fp32.
+  c = float_to_half(half_to_float(a) * half_to_float(b));
+  #else
   asm volatile("mul.f16 %0, %1, %2;\n" : "=h"(c) : "h"(a), "h"(b));
+  #endif
 #else
   asm volatile("v_mul_f16 %0, %1, %2;\n" : "=v"(c) : "v"(a), "v"(b));
 #endif
@@ -220,7 +238,14 @@ template <>
 inline __device__ uint32_t mul(uint32_t a, uint32_t b) {
   uint32_t c;
 #ifndef USE_ROCM
+  #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 530
+  // Maxwell: emulate packed half2 mul via fp32.
+  float2 fa = half2_to_float2(a);
+  float2 fb = half2_to_float2(b);
+  c = float2_to_half2(make_float2(fa.x * fb.x, fa.y * fb.y));
+  #else
   asm volatile("mul.f16x2 %0, %1, %2;\n" : "=r"(c) : "r"(a), "r"(b));
+  #endif
 #else
   asm volatile("v_pk_mul_f16 %0, %1, %2;\n" : "=v"(c) : "v"(a), "v"(b));
 #endif
@@ -331,9 +356,17 @@ inline __device__ Float8_ mul(uint16_t a, uint4 b) {
 inline __device__ uint32_t fma(uint32_t a, uint32_t b, uint32_t c) {
   uint32_t d;
 #ifndef USE_ROCM
+  #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 530
+  // Maxwell: emulate packed half2 FMA via fp32.
+  float2 fa = half2_to_float2(a);
+  float2 fb = half2_to_float2(b);
+  float2 fc = half2_to_float2(c);
+  d = float2_to_half2(make_float2(fa.x * fb.x + fc.x, fa.y * fb.y + fc.y));
+  #else
   asm volatile("fma.rn.f16x2 %0, %1, %2, %3;\n"
                : "=r"(d)
                : "r"(a), "r"(b), "r"(c));
+  #endif
 #else
   asm volatile("v_pk_fma_f16 %0, %1, %2, %3;\n"
                : "=v"(d)

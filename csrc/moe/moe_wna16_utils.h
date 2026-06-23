@@ -96,6 +96,29 @@ __device__ inline uint32_t prmt(uint32_t a) {
   return res;
 }
 
+// Maxwell (sm_50/sm_52) lacks native fp16 ALU (__hsub2/__hfma2 need sm_53+).
+// Emulate via fp32 convert -> compute -> convert. Conversions are sm_50-safe.
+static __device__ inline half2 maxwell_safe_hsub2(half2 a, half2 b) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 530
+  float2 fa = __half22float2(a);
+  float2 fb = __half22float2(b);
+  return __float22half2_rn(make_float2(fa.x - fb.x, fa.y - fb.y));
+#else
+  return __hsub2(a, b);
+#endif
+}
+
+static __device__ inline half2 maxwell_safe_hfma2(half2 a, half2 b, half2 c) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 530
+  float2 fa = __half22float2(a);
+  float2 fb = __half22float2(b);
+  float2 fc = __half22float2(c);
+  return __float22half2_rn(make_float2(fa.x * fb.x + fc.x, fa.y * fb.y + fc.y));
+#else
+  return __hfma2(a, b, c);
+#endif
+}
+
 template <typename scalar_t2, int bit>
 __device__ inline void dequant(int q, scalar_t2* res) {}
 
@@ -114,16 +137,16 @@ __device__ inline void dequant<half2, 4>(int q, half2* res) {
   int lo1 = lop3<(0xf0 & 0xcc) | 0xaa>(q, LO, EX);
   int hi1 = lop3<(0xf0 & 0xcc) | 0xaa>(q, HI, EX);
 
-  res[0] = __hsub2(*reinterpret_cast<half2*>(&lo0),
-                   *reinterpret_cast<const half2*>(&SUB));
-  res[1] = __hfma2(*reinterpret_cast<half2*>(&hi0),
-                   *reinterpret_cast<const half2*>(&MUL),
-                   *reinterpret_cast<const half2*>(&ADD));
-  res[2] = __hsub2(*reinterpret_cast<half2*>(&lo1),
-                   *reinterpret_cast<const half2*>(&SUB));
-  res[3] = __hfma2(*reinterpret_cast<half2*>(&hi1),
-                   *reinterpret_cast<const half2*>(&MUL),
-                   *reinterpret_cast<const half2*>(&ADD));
+  res[0] = maxwell_safe_hsub2(*reinterpret_cast<half2*>(&lo0),
+                              *reinterpret_cast<const half2*>(&SUB));
+  res[1] = maxwell_safe_hfma2(*reinterpret_cast<half2*>(&hi0),
+                              *reinterpret_cast<const half2*>(&MUL),
+                              *reinterpret_cast<const half2*>(&ADD));
+  res[2] = maxwell_safe_hsub2(*reinterpret_cast<half2*>(&lo1),
+                              *reinterpret_cast<const half2*>(&SUB));
+  res[3] = maxwell_safe_hfma2(*reinterpret_cast<half2*>(&hi1),
+                              *reinterpret_cast<const half2*>(&MUL),
+                              *reinterpret_cast<const half2*>(&ADD));
 }
 
 template <>
@@ -137,10 +160,12 @@ __device__ inline void dequant<half2, 8>(int q, half2* res) {
 
   static constexpr uint32_t I8s_TO_F16s_MAGIC_NUM = 0x64006400;
 
-  res[0] = __hsub2(*reinterpret_cast<half2*>(&lo),
-                   *reinterpret_cast<const half2*>(&I8s_TO_F16s_MAGIC_NUM));
-  res[1] = __hsub2(*reinterpret_cast<half2*>(&hi),
-                   *reinterpret_cast<const half2*>(&I8s_TO_F16s_MAGIC_NUM));
+  res[0] = maxwell_safe_hsub2(
+      *reinterpret_cast<half2*>(&lo),
+      *reinterpret_cast<const half2*>(&I8s_TO_F16s_MAGIC_NUM));
+  res[1] = maxwell_safe_hsub2(
+      *reinterpret_cast<half2*>(&hi),
+      *reinterpret_cast<const half2*>(&I8s_TO_F16s_MAGIC_NUM));
 }
 
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
