@@ -25,6 +25,12 @@ __global__ void moe_wna16_gemm_kernel(
     uint32_t size_n, uint32_t size_k, uint16_t BLOCK_SIZE_M,
     uint16_t BLOCK_SIZE_N, uint16_t BLOCK_SIZE_K, bool has_zp,
     bool mul_topk_weight) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 530
+  // MAXWELL (sm_50/sm_52): no native fp16 arithmetic (__hfma2 etc., sm_53+).
+  // WNA16 quantized MoE is unsupported here; compile a no-op device kernel so
+  // the host symbol remains defined for torch bindings.
+  return;
+#else
 #if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ < 800
   if constexpr (std::is_same<scalar_t, nv_bfloat16>::value) {
     return;
@@ -220,6 +226,7 @@ __global__ void moe_wna16_gemm_kernel(
 #if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ < 800
   }
 #endif
+#endif  // MAXWELL < 530 guard
 }
 
 template <typename scalar_t>
