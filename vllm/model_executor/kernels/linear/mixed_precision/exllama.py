@@ -22,7 +22,9 @@ class ExllamaLinearKernel(MPLinearKernel):
 
     @classmethod
     def get_min_capability(cls) -> int:
-        return 60
+        # The exllama gptq_gemm kernel is plain fp16 (no mma.sync / dp4a), so it
+        # builds and runs on Maxwell sm_50 via our fp16-emulation compat layer.
+        return 50
 
     @classmethod
     def can_implement(cls, c: MPLinearLayerConfig) -> tuple[bool, str | None]:

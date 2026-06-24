@@ -41,11 +41,11 @@ from vllm.model_executor.layers.quantization.utils.gptq_utils import (
     override_config,
 )
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
+    check_marlin_supported,
     check_moe_marlin_supports_layer,
     get_marlin_input_dtype,
     marlin_make_workspace_new,
     marlin_repeat_scales_on_all_ranks,
-    verify_marlin_supported,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
@@ -314,11 +314,18 @@ class AutoGPTQLinearMethod(LinearMethodBase):
         self.input_dtype = None
         self.quant_type = self.quant_config.quant_type
 
-        # Verify supported on platform.
-        verify_marlin_supported(
+        # Verify Marlin support, but don't hard-fail: on hardware where Marlin
+        # is unavailable (e.g. Maxwell sm_50), create_weights() falls through to
+        # a non-Marlin kernel (Exllama) via choose_mp_linear_kernel(). Pre-raising
+        # here would prevent that fallback.
+        if not check_marlin_supported(
             quant_type=self.quant_config.quant_type,
             group_size=self.quant_config.group_size,
-        )
+        ):
+            logger.debug(
+                "Marlin unavailable for this config/device; will select a "
+                "non-Marlin GPTQ kernel (e.g. Exllama)."
+            )
 
     def create_weights(
         self,
