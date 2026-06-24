@@ -18,6 +18,27 @@ Shang and Dang, Xingyu and Han, Song}, journal={arXiv}, year={2023}
 namespace vllm {
 namespace awq {
 
+// Maxwell (sm_50/sm_52) lacks native packed-fp16 ALU (sub.f16x2 / fma.rn.f16x2
+// require sm_53+). These helpers operate on the uint32_t packed-half2
+// representation and emulate via fp32 (conversions are sm_50-safe), so the AWQ
+// dequant kernel below builds and runs on Maxwell. On sm_53+ the original inline
+// PTX is used directly at the call sites guarded by __CUDA_ARCH__.
+__device__ __forceinline__ uint32_t awq_sub_h2(uint32_t a, uint32_t b) {
+  float2 fa = __half22float2(*reinterpret_cast<const half2*>(&a));
+  float2 fb = __half22float2(*reinterpret_cast<const half2*>(&b));
+  half2 r = __float22half2_rn(make_float2(fa.x - fb.x, fa.y - fb.y));
+  return *reinterpret_cast<const uint32_t*>(&r);
+}
+__device__ __forceinline__ uint32_t awq_fma_h2(uint32_t a, uint32_t b,
+                                               uint32_t c) {
+  float2 fa = __half22float2(*reinterpret_cast<const half2*>(&a));
+  float2 fb = __half22float2(*reinterpret_cast<const half2*>(&b));
+  float2 fc = __half22float2(*reinterpret_cast<const half2*>(&c));
+  half2 r =
+      __float22half2_rn(make_float2(fa.x * fb.x + fc.x, fa.y * fb.y + fc.y));
+  return *reinterpret_cast<const uint32_t*>(&r);
+}
+
 template <int N>
 __global__ void __launch_bounds__(64)
     gemm_forward_4bit_cuda_m16nXk32(int G, int split_k_iters,
@@ -376,6 +397,17 @@ __global__ void __launch_bounds__(64)
 
   uint32_t B_loaded = *(uint32_t*)B_ptr2;
   uint4 B_loaded_fp16 = dequantize_s4_to_fp16x2(B_loaded);
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 530
+  // Maxwell: emulate packed-half sub/fma in fp32.
+  B_loaded_fp16.x = awq_sub_h2(B_loaded_fp16.x, B_loaded_zero.x);
+  B_loaded_fp16.x = awq_fma_h2(B_loaded_fp16.x, B_loaded_scale.x, ZERO);
+  B_loaded_fp16.y = awq_sub_h2(B_loaded_fp16.y, B_loaded_zero.y);
+  B_loaded_fp16.y = awq_fma_h2(B_loaded_fp16.y, B_loaded_scale.y, ZERO);
+  B_loaded_fp16.z = awq_sub_h2(B_loaded_fp16.z, B_loaded_zero.z);
+  B_loaded_fp16.z = awq_fma_h2(B_loaded_fp16.z, B_loaded_scale.z, ZERO);
+  B_loaded_fp16.w = awq_sub_h2(B_loaded_fp16.w, B_loaded_zero.w);
+  B_loaded_fp16.w = awq_fma_h2(B_loaded_fp16.w, B_loaded_scale.w, ZERO);
+#else
   asm volatile("sub.f16x2 %0, %1, %2;\n"
                : "=r"(B_loaded_fp16.x)
                : "r"(B_loaded_fp16.x), "r"(B_loaded_zero.x));
@@ -400,6 +432,7 @@ __global__ void __launch_bounds__(64)
   asm volatile("fma.rn.f16x2 %0, %1, %2, %3;\n"
                : "=r"(B_loaded_fp16.w)
                : "r"(B_loaded_fp16.w), "r"(B_loaded_scale.w), "r"(ZERO));
+#endif
 
   *(uint4*)B_shared_ptr2 = B_loaded_fp16;
 
