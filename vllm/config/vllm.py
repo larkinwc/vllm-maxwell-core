@@ -1059,6 +1059,40 @@ class VllmConfig:
             self.compilation_config.mode = CompilationMode.NONE
             self.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
 
+        # NOTE(maxwell): vLLM's torch.compile pipeline (CompilationMode
+        # VLLM_COMPILE / PIECEWISE cudagraphs) lowers through Inductor -> Triton,
+        # and Triton requires compute capability >= 7.0. On older GPUs (e.g.
+        # Maxwell sm_50 Tesla M10) this raises GPUTooOldForTriton at engine
+        # init. CUDA graph *capture* itself is a pure CUDA-runtime feature and
+        # works fine, so disable only the Inductor compile (mode=NONE) while
+        # keeping FULL cudagraphs (which need no graph splitting / Triton).
+        # Users can still force eager via enforce_eager, or opt back into
+        # compilation by explicitly setting cudagraph_mode.
+        if (
+            self.model_config is not None
+            and not self.model_config.enforce_eager
+        ):
+            _cap = current_platform.get_device_capability()
+            if _cap is not None and _cap.to_int() < 70:
+                if self.compilation_config.mode in (
+                    None,
+                    CompilationMode.VLLM_COMPILE,
+                ):
+                    logger.warning_once(
+                        "Compute capability %s does not support Triton "
+                        "(requires >= 7.0); disabling vLLM's torch.compile "
+                        "pipeline (-cc.mode=none) and using FULL CUDA graphs "
+                        "instead of PIECEWISE.",
+                        _cap.as_version_str(),
+                    )
+                    self.compilation_config.mode = CompilationMode.NONE
+                if self.compilation_config.cudagraph_mode in (
+                    None,
+                    CUDAGraphMode.PIECEWISE,
+                    CUDAGraphMode.FULL_AND_PIECEWISE,
+                ):
+                    self.compilation_config.cudagraph_mode = CUDAGraphMode.FULL
+
         if os.environ.get("TORCH_COMPILE_DISABLE") == "1":
             logger.warning(
                 "TORCH_COMPILE_DISABLE is set, disabling torch.compile. "
