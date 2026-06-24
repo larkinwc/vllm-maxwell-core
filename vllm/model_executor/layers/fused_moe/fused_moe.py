@@ -1192,6 +1192,13 @@ def get_moe_wna16_block_config(
 def should_moe_wna16_use_cuda(
     num_valid_tokens: int, group_size: int, num_experts: int, bit: int
 ):
+    # NOTE(maxwell): the CUDA moe_wna16_gemm kernel (csrc/moe/moe_wna16.cu)
+    # uses fp16 arithmetic intrinsics that require sm_53+, and on sm_50/sm_52 it
+    # is compiled to a no-op (returns without writing output -> garbage). Route
+    # Maxwell/older GPUs to the Triton WNA16 path, which works there.
+    cap = current_platform.get_device_capability()
+    if cap is not None and cap.to_int() < 80:
+        return False
     return (
         current_platform.is_cuda()
         and bit == 4
