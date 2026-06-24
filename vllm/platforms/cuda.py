@@ -171,6 +171,33 @@ class CudaPlatformBase(Platform):
         "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES",
     ]
 
+    def __init__(self) -> None:
+        super().__init__()
+        # NOTE(maxwell): several layers (e.g. vocab_parallel_embedding's
+        # get_masked_input_and_mask, fused-MoE routers, RMSNorm helpers) are
+        # decorated with @torch.compile(backend=current_platform.
+        # simple_compile_backend). With the default "inductor" backend these
+        # lower through Triton, which requires compute capability >= 7.0 and
+        # raises GPUTooOldForTriton on Maxwell (sm_50). Some of these paths only
+        # trigger under tensor parallelism (the TP>1 vocab embedding mask), so
+        # they slip past the model-level mode=NONE guard. Fall back to the
+        # "eager" torch.compile backend on pre-Volta GPUs so these standalone
+        # compiled functions run without Triton. This is read at import time by
+        # the decorators, and current_platform is resolved (instantiated) before
+        # those layer modules import, so setting it here takes effect.
+        try:
+            cap = self.get_device_capability()
+        except Exception:
+            cap = None
+        if cap is not None and cap.to_int() < 70:
+            type(self).simple_compile_backend = "eager"
+            logger.warning(
+                "Compute capability %s does not support Triton (requires "
+                ">= 7.0); using 'eager' as simple_compile_backend for "
+                "standalone @torch.compile functions.",
+                cap.as_version_str(),
+            )
+
     @property
     def supported_dtypes(self) -> list[torch.dtype]:
         if self.has_device_capability(80):
