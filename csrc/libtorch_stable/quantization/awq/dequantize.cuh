@@ -15,8 +15,62 @@ namespace vllm {
 namespace awq {
 
 __device__ uint4 dequantize_s4_to_fp16x2(uint32_t const& source) {
-#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 750
-  assert(false);
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 530
+  // Maxwell (sm_50/sm_52): the int4->fp16 bit tricks (lop3/prmt) are arch-safe,
+  // but the trailing sub.f16x2/fma.rn.f16x2 need sm_53+. Run the same algorithm
+  // and emulate only those packed-half ops via fp32 (conversions are sm_50-safe).
+  uint4 result;
+
+  uint32_t* h = reinterpret_cast<uint32_t*>(&result);
+  uint32_t const i4s = reinterpret_cast<uint32_t const&>(source);
+
+  static constexpr uint32_t immLut = (0xf0 & 0xcc) | 0xaa;
+  static constexpr uint32_t BOTTOM_MASK = 0x000f000f;
+  static constexpr uint32_t TOP_MASK = 0x00f000f0;
+  static constexpr uint32_t I4s_TO_F16s_MAGIC_NUM = 0x64006400;
+
+  const uint32_t top_i4s = i4s >> 8;
+  asm volatile("lop3.b32 %0, %1, %2, %3, %4;\n"
+               : "=r"(h[0])
+               : "r"(i4s), "n"(BOTTOM_MASK), "n"(I4s_TO_F16s_MAGIC_NUM),
+                 "n"(immLut));
+  asm volatile("lop3.b32 %0, %1, %2, %3, %4;\n"
+               : "=r"(h[1])
+               : "r"(i4s), "n"(TOP_MASK), "n"(I4s_TO_F16s_MAGIC_NUM),
+                 "n"(immLut));
+  asm volatile("lop3.b32 %0, %1, %2, %3, %4;\n"
+               : "=r"(h[2])
+               : "r"(top_i4s), "n"(BOTTOM_MASK), "n"(I4s_TO_F16s_MAGIC_NUM),
+                 "n"(immLut));
+  asm volatile("lop3.b32 %0, %1, %2, %3, %4;\n"
+               : "=r"(h[3])
+               : "r"(top_i4s), "n"(TOP_MASK), "n"(I4s_TO_F16s_MAGIC_NUM),
+                 "n"(immLut));
+
+  static constexpr uint32_t FP16_TOP_MAGIC_NUM = 0x64006400;
+  static constexpr uint32_t ONE_SIXTEENTH = 0x2c002c00;
+  static constexpr uint32_t NEG_64 = 0xd400d400;
+
+  // Emulate sub.f16x2 / fma.rn.f16x2 in fp32.
+  auto sub_h2 = [] __device__(uint32_t a, uint32_t b) -> uint32_t {
+    float2 fa = __half22float2(*reinterpret_cast<const half2*>(&a));
+    float2 fb = __half22float2(*reinterpret_cast<const half2*>(&b));
+    half2 r = __float22half2_rn(make_float2(fa.x - fb.x, fa.y - fb.y));
+    return *reinterpret_cast<const uint32_t*>(&r);
+  };
+  auto fma_h2 = [] __device__(uint32_t a, uint32_t b, uint32_t c) -> uint32_t {
+    float2 fa = __half22float2(*reinterpret_cast<const half2*>(&a));
+    float2 fb = __half22float2(*reinterpret_cast<const half2*>(&b));
+    float2 fc = __half22float2(*reinterpret_cast<const half2*>(&c));
+    half2 r =
+        __float22half2_rn(make_float2(fa.x * fb.x + fc.x, fa.y * fb.y + fc.y));
+    return *reinterpret_cast<const uint32_t*>(&r);
+  };
+  h[0] = sub_h2(h[0], FP16_TOP_MAGIC_NUM);
+  h[1] = fma_h2(h[1], ONE_SIXTEENTH, NEG_64);
+  h[2] = sub_h2(h[2], FP16_TOP_MAGIC_NUM);
+  h[3] = fma_h2(h[3], ONE_SIXTEENTH, NEG_64);
+  return result;
 #else
   uint4 result;
 
