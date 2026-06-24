@@ -4,8 +4,10 @@ This fork (`maxwell/v0.23`) makes vLLM build and run on **Maxwell GM10x GPUs
 (compute capability 5.0 / 5.2)** — specifically the Tesla M10 — for use as a
 **decode tier** in a disaggregated prefill/decode deployment.
 
-> Status: **fp16 dense + AWQ 4-bit + GPTQ 4-bit all generate coherent text on a
-> real Tesla M10.** Validated end-to-end with vLLM v1 engine, eager mode.
+> Status: **fp16 dense + AWQ 4-bit + GPTQ 4-bit + GPTQ MoE + Qwen3.5 (hybrid
+> Mamba/attention) all generate coherent text on a real Tesla M10.** Validated
+> end-to-end with vLLM v1 engine, both eager AND full CUDA graphs, TP=1 and
+> TP=2.
 
 ## Why Maxwell needs patches
 
@@ -49,9 +51,15 @@ CUDA_VISIBLE_DEVICES=0            # scope to the M10s (box also has MI100s)
 VLLM_USE_FLASHINFER_SAMPLER=0     # flashinfer is tensor-core only; use native sampler
 ```
 
-- `enforce_eager=True` for now (cudagraphs to come).
+- **CUDA graphs work** and are auto-enabled on sm<70 (FULL graph capture is a
+  pure-runtime feature; only Inductor/Triton *compilation* needs cc>=7, which we
+  bypass with the eager `simple_compile_backend`). Pass `enforce_eager=True` to
+  opt out.
 - FlashAttention v2/v3 require cc>=8 and auto-disable; vLLM falls back to a
   working attention backend automatically.
+- Multimodal (vision) models: pass `limit_mm_per_prompt={"image": 0, "video": 0}`
+  for **text-only** use. The ViT encoder does O(N^2) SDPA that OOMs the 7 GB M10
+  during dummy-image memory profiling otherwise.
 
 ## What was patched
 
@@ -81,6 +89,18 @@ VLLM_USE_FLASHINFER_SAMPLER=0     # flashinfer is tensor-core only; use native s
   Exllama when Marlin (tensor-core) is unavailable.
 - `kernels/linear/mixed_precision/exllama.py` — lower
   `ExllamaLinearKernel` min capability 60->50 (plain fp16 kernel, no mma/dp4a).
+- `model_executor/layers/fused_moe/fused_moe.py` — `should_moe_wna16_use_cuda()`
+  returns False on cc<80, routing int4 MoE matmuls to the **Triton WNA16 path**.
+  The CUDA `moe_wna16_gemm` kernel uses sm_53+ fp16 intrinsics and is a no-op on
+  sm_50 (silent garbage; models emitted repeated "I I I" during decode).
+
+### Python (CUDA graphs / torch.compile on sm<70)
+- `config/vllm.py` — auto-enable FULL CUDA graphs when cc<70 and not
+  enforce_eager (set CompilationMode.NONE + CUDAGraphMode.FULL). Graph *capture*
+  is pure runtime and works; only Inductor codegen needs cc>=7.
+- `platforms/cuda.py` — set `simple_compile_backend="eager"` on cc<70 so the
+  ~10 standalone `@torch.compile` decorators (embedding mask, MoE routers,
+  RMSNorm) fall back to eager instead of crashing in Inductor.
 
 ## Validation (real Tesla M10, sm_50)
 
@@ -98,8 +118,18 @@ End-to-end generation (vLLM v1, eager):
 | model | quant | result |
 |---|---|---|
 | facebook/opt-125m | fp16 | coherent ("...capital of the French Republic") |
+| facebook/opt-125m (TP=2 + cudagraphs) | fp16 | coherent (NCCL/TP validated) |
 | Qwen2-0.5B-Instruct-AWQ | AWQ int4 | coherent (answers "Paris") |
+| Qwen2-0.5B-Instruct-AWQ (+ cudagraphs) | AWQ int4 | coherent |
 | Qwen2-0.5B-Instruct-GPTQ-Int4 | GPTQ int4 | coherent (answers "Paris") |
+| Qwen1.5-MoE-A2.7B-Chat-GPTQ-Int4 (TP=2, FULL cudagraphs) | GPTQ int4 MoE | coherent (answers "D. Paris") |
+| Qwen/Qwen3.5-0.8B (hybrid Mamba+attn, text-mode) | fp16 | coherent (answers "Paris") |
+
+CUDA graphs (FULL capture) and TP=2 (NCCL host-staged SHM all-reduce) both
+validated; identical output to eager. Qwen3.5 needs torchvision built from
+source against torch 2.11 (`v0.26.0`, `--no-deps`) for its image-processor
+import chain; the Mamba/linear-attention Triton kernels JIT-compile and run on
+sm_50.
 
 ## Hardware notes
 - 2x Tesla M10 = 8 GPU dies (GM107, sm_50), ~6.9 GB usable each.
