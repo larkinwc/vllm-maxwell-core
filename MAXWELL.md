@@ -4,10 +4,10 @@ This fork (`maxwell/v0.23`) makes vLLM build and run on **Maxwell GM10x GPUs
 (compute capability 5.0 / 5.2)** — specifically the Tesla M10 — for use as a
 **decode tier** in a disaggregated prefill/decode deployment.
 
-> Status: **fp16 dense + AWQ 4-bit + GPTQ 4-bit + GPTQ MoE + Qwen3.5 (hybrid
-> Mamba/attention) all generate coherent text on a real Tesla M10.** Validated
-> end-to-end with vLLM v1 engine, both eager AND full CUDA graphs, TP=1 and
-> TP=2.
+> Status: **fp16 dense + AWQ + GPTQ + GPTQ-MoE + GGUF (Q4_0..Q8_0 + K-quants) +
+> Qwen3.5 (hybrid Mamba/attention) all generate coherent text on a real Tesla
+> M10.** Validated end-to-end with vLLM v1 engine, eager and full CUDA graphs,
+> TP up to 8.
 
 ## Why Maxwell needs patches
 
@@ -94,6 +94,16 @@ VLLM_USE_FLASHINFER_SAMPLER=0     # flashinfer is tensor-core only; use native s
   The CUDA `moe_wna16_gemm` kernel uses sm_53+ fp16 intrinsics and is a no-op on
   sm_50 (silent garbage; models emitted repeated "I I I" during decode).
 
+### GGUF / ggml kernels (csrc)
+- `libtorch_stable/quantization/gguf/vecdotq.cuh` — the ggml vec-dot helpers do
+  their int8x4 dot products with `__dp4a` (sm_61+). The 23 bodies were guarded
+  `#if __CUDA_ARCH__ >= 610` with **no `#else`**, so on sm_50 they returned
+  uninitialized garbage (decode -> NaN; compiled clean, only caught on-device).
+  Added a **software `__dp4a` emulation** (signed int8x4 dot) for sm<610 and
+  un-guarded the bodies. One change fixes MMVQ (decode), MMQ (prefill) and MoE,
+  which all share these helpers. `ggml_dequantize` was already sm_50-safe.
+- `quantization/gguf.py` — lower min capability 60 -> 50.
+
 ### Python (CUDA graphs / torch.compile on sm<70)
 - `config/vllm.py` — auto-enable FULL CUDA graphs when cc<70 and not
   enforce_eager (set CompilationMode.NONE + CUDAGraphMode.FULL). Graph *capture*
@@ -130,6 +140,30 @@ validated; identical output to eager. Qwen3.5 needs torchvision built from
 source against torch 2.11 (`v0.26.0`, `--no-deps`) for its image-processor
 import chain; the Mamba/linear-attention Triton kernels JIT-compile and run on
 sm_50.
+
+## Quant performance on Maxwell (decode is memory-bandwidth-bound)
+
+Per-die roofline (Tesla M10, measured): **~72 GB/s** HBM, **1.17 TFLOP/s** fp32,
+**0.93 TFLOP/s** fp16 (fp16 is *slower* — no fp16 ALU, every op pays a convert).
+Decode (batch=1 GEMV) is bandwidth-bound, so a packed 4-bit weight that is read
+without materializing fp16 should beat fp16. Single-die microbench, K=4096
+decode GEMV, time vs fp16 `torch.mm`:
+
+| path | N=4096 | N=11008 | vs fp16 | why |
+|---|---|---|---|---|
+| fp16 mm | 517 us | 1328 us | 1.0x | baseline (reads fp16 weight) |
+| **GGUF Q4_0 (MMVQ)** | **210 us** | **509 us** | **0.38-0.41x** | fused, weights stay packed -> ~2.5x faster |
+| GGUF Q8_0 (MMVQ) | 318 us | 801 us | 0.60x | fused, 8-bit |
+| GPTQ Int4 (Exllama) | ~595 us | ~1377 us | 0.84-1.07x | fused dequant, fp16 convert |
+| AWQ Int4 | 3179 us | 8510 us | **5-6x SLOWER** | materializes full fp16 weight first |
+
+**Takeaways:**
+- **GGUF Q4_0/Q4_K is the fastest quant on Maxwell** (~2.5x faster than fp16,
+  ~13x faster than AWQ) and uses 1/4 the VRAM. Prefer it for the decode tier.
+- **GPTQ-Int4 (Exllama)** is the next best — competitive with fp16.
+- **Avoid AWQ**: its sm_50 path dequantizes the whole weight to fp16 then
+  matmuls, paying *more* bandwidth than fp16 plus a slow scalar unpack. At the
+  system level fp16 TP=8 (224 tok/s) beat AWQ TP=8 (186 tok/s).
 
 ## Hardware notes
 - 2x Tesla M10 = 8 GPU dies (GM107, sm_50), ~6.9 GB usable each.
