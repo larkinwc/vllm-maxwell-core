@@ -697,14 +697,15 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
         # initialize GGUF param after we know the quantize type
         is_gguf_weight = getattr(param, "is_gguf_weight", False)
         is_gguf_weight_type = getattr(param, "is_gguf_weight_type", False)
-        if isinstance(loaded_shard_id, tuple) and (
-            is_gguf_weight or is_gguf_weight_type
-        ):
-            raise NotImplementedError(
-                "Shard id with multiple indices is not supported for GGUF."
-            )
+        # GGUF: a tuple shard-id means the GGUF checkpoint already stores
+        # these consecutive shards pre-fused in a single tensor (e.g. Qwen3.5
+        # GDN in_proj_qkv -> qkvz shards (0,1,2)). Accept it as one shard.
         if is_gguf_weight_type:
-            if loaded_shard_id is not None:
+            if isinstance(loaded_shard_id, tuple):
+                for _i in loaded_shard_id:
+                    param.data[_i].copy_(loaded_weight)
+                param.shard_weight_type[loaded_shard_id] = loaded_weight.item()
+            elif loaded_shard_id is not None:
                 param.data[loaded_shard_id].copy_(loaded_weight)
                 param.shard_weight_type[loaded_shard_id] = loaded_weight.item()
             else:

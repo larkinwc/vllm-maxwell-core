@@ -200,6 +200,20 @@ class GGUFModelLoader(BaseModelLoader):
                     )
                 )
 
+        # QWEN35_OVERRIDES: Qwen3.5 hybrid (GatedDeltaNet SSM + full attn).
+        # gguf-py maps most tensors via the qwen35 arch map, but two GDN
+        # params are nn.Parameters without a .weight/.bias suffix and are
+        # not covered by the tensor-name map, so add them manually.
+        if model_type in ("qwen3_5", "qwen3_5_text"):
+            model_type = "qwen35"
+            for idx in range(text_config.num_hidden_layers):
+                gguf_to_hf_name_map[f"blk.{idx}.ssm_a"] = (
+                    f"model.layers.{idx}.linear_attn.A_log"
+                )
+                gguf_to_hf_name_map[f"blk.{idx}.ssm_dt.bias"] = (
+                    f"model.layers.{idx}.linear_attn.dt_bias"
+                )
+
         arch = None
         for key, value in gguf.MODEL_ARCH_NAMES.items():
             if value == model_type:

@@ -224,6 +224,8 @@ class Qwen3_5Model(Qwen3NextModel):
         self.embed_tokens = VocabParallelEmbedding(
             self.vocab_size,
             config.hidden_size,
+            quant_config=vllm_config.quant_config,
+            prefix=maybe_prefix(prefix, "embed_tokens"),
         )
 
         def get_layer(prefix: str):
@@ -425,6 +427,29 @@ class Qwen3_5Model(Qwen3NextModel):
                     weight_loader = getattr(
                         param, "weight_loader", default_weight_loader
                     )
+                    # GGUF stores conv1d weight as [channels, kernel] but the
+                    # Conv1d param is [channels, 1, kernel]; add the middle dim.
+                    if (
+                        "conv1d" in name
+                        and loaded_weight.dim() == 2
+                        and getattr(param, "dim", lambda: None)
+                        and param.dim() == 3
+                        and param.shape[1] == 1
+                    ):
+                        loaded_weight = loaded_weight.unsqueeze(1)
+                    # GGUF stores ssm_a as A = -exp(A_log) (already
+                    # exponentiated by llama.cpp), but vLLM's GDN kernel
+                    # expects raw A_log and applies -exp() internally.
+                    # Invert: A_log = log(-A).
+                    if name.endswith("linear_attn.A_log"):
+                        loaded_weight = torch.log(-loaded_weight.float())
+                    # GGUF (llama.cpp) stores all RMSNorm weights with a +1
+                    # offset EXCEPT the GDN gated norm (linear_attn.norm).
+                    # vLLM RMSNorm expects raw HF weights; subtract 1 back.
+                    if name.endswith("norm.weight") and not name.endswith(
+                        "linear_attn.norm.weight"
+                    ):
+                        loaded_weight = loaded_weight - 1
                     weight_loader(param, loaded_weight)
             loaded_params.add(name)
         return loaded_params
@@ -433,6 +458,7 @@ class Qwen3_5Model(Qwen3NextModel):
 class Qwen3_5ForCausalLMBase(
     nn.Module,
     HasInnerState,
+    IsHybrid,
     SupportsEagle3,
     SupportsLoRA,
     SupportsPP,
@@ -524,6 +550,43 @@ class Qwen3_5ForCausalLMBase(
             skip_prefixes=["mtp."],
         )
         return loader.load_weights(weights)
+
+    @classmethod
+    def get_mamba_state_dtype_from_config(
+        cls,
+        vllm_config: "VllmConfig",
+    ) -> tuple[torch.dtype, torch.dtype]:
+        return MambaStateDtypeCalculator.gated_delta_net_state_dtype(
+            vllm_config.model_config.dtype,
+            vllm_config.cache_config.mamba_cache_dtype,
+            vllm_config.cache_config.mamba_ssm_cache_dtype,
+        )
+
+    @classmethod
+    def get_mamba_state_shape_from_config(
+        cls, vllm_config: "VllmConfig"
+    ) -> tuple[tuple[int, int], tuple[int, int]]:
+        parallel_config = vllm_config.parallel_config
+        hf_config = vllm_config.model_config.hf_text_config
+        tp_size = parallel_config.tensor_parallel_size
+        num_spec = (
+            vllm_config.speculative_config.num_speculative_tokens
+            if vllm_config.speculative_config
+            else 0
+        )
+        return MambaStateShapeCalculator.gated_delta_net_state_shape(
+            tp_size,
+            hf_config.linear_num_key_heads,
+            hf_config.linear_num_value_heads,
+            hf_config.linear_key_head_dim,
+            hf_config.linear_value_head_dim,
+            hf_config.linear_conv_kernel_dim,
+            num_spec,
+        )
+
+    @classmethod
+    def get_mamba_state_copy_func(cls) -> tuple[MambaStateCopyFunc, MambaStateCopyFunc]:
+        return MambaStateCopyFuncCalculator.gated_delta_net_state_copy_func()
 
 
 class Qwen3_5ForCausalLM(Qwen3_5ForCausalLMBase):

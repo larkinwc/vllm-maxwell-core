@@ -431,6 +431,19 @@ except AttributeError as error:
     raise error
 
 
+_QKV_SHARD_ORDER = {"q": 0, "k": 1, "v": 2}
+
+
+def _gguf_shard_sort_key(idx):
+    """Canonical position of a GGUF merged-linear shard id.
+    Handles str q/k/v, int shard ids, and tuple (pre-fused) shard ids."""
+    if isinstance(idx, tuple):
+        return idx[0]
+    if isinstance(idx, str):
+        return _QKV_SHARD_ORDER.get(idx, 0)
+    return idx
+
+
 class GGUFLinearMethod(LinearMethodBase):
     """Linear method for GGUF.
 
@@ -517,15 +530,19 @@ class GGUFLinearMethod(LinearMethodBase):
             padded_data = torch.zeros(
                 (concat_side, padded_side), dtype=dtype, device=qweight.device
             )
-            # (dim0_start, dim0_end, dim1_size)
+            # (dim0_start, dim0_end, dim1_size). Place shards in canonical
+            # order (q,k,v,z) regardless of checkpoint load order so the
+            # fused layout is correct.
             shard_offset_map = dict[str, tuple[int, int, int]]()
-            for idx in shard_id:
+            start = 0
+            for idx in sorted(shard_id, key=_gguf_shard_sort_key):
                 id_in_container = shard_id_map[idx]
-                start = sum(x.size(0) for x in data_container[:id_in_container])
-                end = start + data_container[id_in_container].size(0)
-                size = data_container[id_in_container].size(1)
-                padded_data[start:end, :size] = data_container[id_in_container]
+                data = data_container[id_in_container]
+                end = start + data.size(0)
+                size = data.size(1)
+                padded_data[start:end, :size] = data
                 shard_offset_map[idx] = (start, end, size)
+                start = end
             qweight.data_container.clear()
             padded_param = Parameter(padded_data, requires_grad=False)
             set_weight_attrs(padded_param, vars(qweight))
@@ -541,8 +558,12 @@ class GGUFLinearMethod(LinearMethodBase):
         shard_id = layer.qweight.shard_id
 
         if shard_id:
-            # dequantize shard weights respectively
-            shard_id = ["q", "k", "v"] if "q" in shard_id else shard_id
+            # dequantize shard weights respectively, in canonical order
+            shard_id = (
+                ["q", "k", "v"]
+                if "q" in shard_id
+                else sorted(shard_id, key=_gguf_shard_sort_key)
+            )
             qweight = layer.qweight
             result = []
             for idx in shard_id:
