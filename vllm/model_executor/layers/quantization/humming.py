@@ -45,23 +45,33 @@ from vllm.model_executor.parameter import (
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 
+# NOTE(maxwell): `humming` is an optional tensor-core-only quant backend that is
+# not installed on Maxwell (sm_50) builds. Importing it unconditionally here
+# crashes the *entire* quant registry walk in get_quantization_config(), which
+# breaks unrelated quant methods (e.g. plain AWQ/GPTQ). Make it a soft import:
+# the HummingConfig class still defines fine (these names are only looked up
+# inside method bodies), so it is only unusable if someone actually selects
+# humming quantization -- which never happens on this hardware.
 if current_platform.is_cuda():
-    from humming.dtypes import DataType
-    from humming.layer import HummingMethod
-    from humming.schema import (
-        BaseInputSchema,
-        BaseWeightSchema,
-        HummingInputSchema,
-        HummingWeightSchema,
-    )
-    from humming.utils.weight import quantize_weight
+    try:
+        from humming.dtypes import DataType
+        from humming.layer import HummingMethod
+        from humming.schema import (
+            BaseInputSchema,
+            BaseWeightSchema,
+            HummingInputSchema,
+            HummingWeightSchema,
+        )
+        from humming.utils.weight import quantize_weight
 
-    from vllm.model_executor.layers.fused_moe.experts.fused_humming_moe import (
-        BatchedHummingGroupedExperts,
-        HummingGroupedExperts,
-        HummingIndexedExperts,
-        get_humming_moe_gemm_type,
-    )
+        from vllm.model_executor.layers.fused_moe.experts.fused_humming_moe import (
+            BatchedHummingGroupedExperts,
+            HummingGroupedExperts,
+            HummingIndexedExperts,
+            get_humming_moe_gemm_type,
+        )
+    except ImportError:
+        pass
 
 if TYPE_CHECKING:
     from humming.schema import (

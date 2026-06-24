@@ -183,7 +183,8 @@ class AutoGPTQConfig(QuantizationConfig):
 
     @classmethod
     def get_min_capability(cls) -> int:
-        return 60
+        # GPTQ exllama kernels build+run on Maxwell (sm_50) via fp16 emulation.
+        return 50
 
     @classmethod
     def get_config_filenames(cls) -> list[str]:

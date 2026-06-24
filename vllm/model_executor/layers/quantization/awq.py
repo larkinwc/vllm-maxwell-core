@@ -22,6 +22,7 @@ from vllm.model_executor.layers.quantization.base_config import (
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import is_layer_skipped
 from vllm.model_executor.parameter import GroupQuantScaleParameter, PackedvLLMParameter
+from vllm.platforms import current_platform
 from vllm.transformers_utils.config import get_safetensors_params_metadata
 
 if TYPE_CHECKING:
@@ -73,8 +74,9 @@ class AWQConfig(QuantizationConfig):
 
     @classmethod
     def get_min_capability(cls) -> int:
-        # The AWQ kernel only supports Turing or newer GPUs.
-        return 75
+        # AWQ dequant enabled on Maxwell (sm_50) via fp32-emulated
+        # int4->fp16 path; see csrc awq/dequantize.cuh.
+        return 50
 
     @staticmethod
     def get_config_filenames() -> list[str]:
@@ -274,9 +276,20 @@ class AWQLinearMethod(LinearMethodBase):
 
         # num_tokens >= threshold
         FP16_MATMUL_HEURISTIC_CONDITION = x.shape[:-1].numel() >= 256
+        # NOTE(maxwell): the fused `awq_gemm` kernel
+        # (gemm_forward_4bit_cuda_m16nXk32) is a tensor-core mma.sync kernel that
+        # only exists for sm_75+; on sm_50 it is compiled out (assert(false)) and
+        # returns uninitialized garbage. The `awq_dequantize` + torch.matmul path
+        # is fully supported on Maxwell, so always take it there.
+        cap = current_platform.get_device_capability()
+        force_dequant_matmul = cap is not None and cap.to_int() < 75
         # Batch invariant mode requires torch.matmul path
         # for Triton override
-        if FP16_MATMUL_HEURISTIC_CONDITION or envs.VLLM_BATCH_INVARIANT:
+        if (
+            FP16_MATMUL_HEURISTIC_CONDITION
+            or envs.VLLM_BATCH_INVARIANT
+            or force_dequant_matmul
+        ):
             out = ops.awq_dequantize(qweight, scales, qzeros, 0, 0, 0)
             out = torch.matmul(reshaped_x, out)
         else:
