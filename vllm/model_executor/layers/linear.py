@@ -1223,10 +1223,28 @@ class QKVParallelLinear(ColumnParallelLinear):
 
         if is_gguf_weight:
             output_dim = getattr(param, "output_dim", None)
-            shard_size = loaded_weight.size(output_dim) // self.tp_size
-            start_idx = self.tp_rank * shard_size
 
             if loaded_shard_id is not None:
+                # GGUF-QKV-KV-REPLICA-FIX: replicate KV heads when
+                # tp_size > total_num_kv_heads. The query shard divides
+                # evenly across ranks, but each k/v shard must hand every
+                # rank a whole number of KV heads, with num_kv_head_replicas
+                # consecutive ranks sharing the same head(s) -- matching the
+                # non-GGUF load_qkv_weight path. The previous code sliced by
+                # size // tp_size for all of q/k/v, which split a single KV
+                # head across ranks and broke the qkv split at TP>num_kv.
+                if loaded_shard_id == "q":
+                    shard_size = loaded_weight.size(output_dim) // self.tp_size
+                    start_idx = self.tp_rank * shard_size
+                else:
+                    shard_size = (
+                        loaded_weight.size(output_dim)
+                        // self.total_num_kv_heads
+                        * self.num_kv_heads
+                    )
+                    start_idx = (
+                        self.tp_rank // self.num_kv_head_replicas
+                    ) * shard_size
                 loaded_weight = loaded_weight.narrow(output_dim, start_idx, shard_size)
                 param.shard_id.append(loaded_shard_id)
                 param.shard_id_map[loaded_shard_id] = len(param.data_container)
