@@ -263,13 +263,15 @@ def _fused_mul_mat_gguf_soa(
     qweight: torch.Tensor,
     qweight_type: int,
     row: int,
+    force_soa: bool,
 ) -> torch.Tensor:
     # Maxwell SoA Q4_0 path: 128-bit coalesced quant loads for the decode
-    # (vec) kernel. Prefill / large batch falls back to the AoS MMQ kernel.
-    mmvq_safe = 2 if row > 5120 else 6
+    # (vec) kernel. With force_soa (decode-only mode, AoS copy freed) ALL batch
+    # sizes use the SoA kernel; otherwise prefill/large batch uses AoS MMQ.
     if x.shape[0] == 0:
         return torch.empty(x.shape[0], row, dtype=x.dtype, device=x.device)
-    if x.shape[0] <= mmvq_safe:
+    mmvq_safe = 2 if row > 5120 else 6
+    if force_soa or x.shape[0] <= mmvq_safe:
         return ops.ggml_mul_mat_vec_a8_soa(quants, scales, x, row)
     return ops.ggml_mul_mat_a8(qweight, x, qweight_type, row)
 
@@ -281,6 +283,7 @@ def _fused_mul_mat_gguf_soa_fake(
     qweight: torch.Tensor,
     qweight_type: int,
     row: int,
+    force_soa: bool,
 ) -> torch.Tensor:
     return torch.empty(x.shape[0], row, dtype=x.dtype, device=x.device)
 
@@ -299,6 +302,8 @@ except AttributeError as error:
 
 def _maybe_build_q4_0_soa(layer: torch.nn.Module) -> None:
     """Build SoA quants/scales for a non-sharded Q4_0 qweight, stash on layer."""
+    if _soa_disabled():
+        return
     qweight = layer.qweight
     if getattr(qweight, "shard_id", None):
         return  # sharded (qkv/merged) layers stay on the AoS path
@@ -313,12 +318,33 @@ def _maybe_build_q4_0_soa(layer: torch.nn.Module) -> None:
     scales = wb[:, :, 0:2].contiguous().view(nrows, bpr * 2).view(torch.float16)
     layer.qweight_soa_quants = quants
     layer.qweight_soa_scales = scales.contiguous()
+    if _gguf_decode_only():
+        # AoS copy no longer needed (SoA handles every batch size).
+        _free_param_data(layer.qweight)
+        layer.qweight_soa_row = nrows
+        layer.qweight_soa_qtype = int(layer.qweight_type.weight_type)
 
 
 def _has_q4_0_soa(layer: torch.nn.Module) -> bool:
     if os.environ.get("VLLM_DISABLE_Q4_0_SOA", "0") == "1":
         return False
     return getattr(layer, "qweight_soa_quants", None) is not None
+
+
+def _gguf_decode_only() -> bool:
+    return os.environ.get("VLLM_GGUF_DECODE_ONLY", "0") == "1"
+
+
+def _soa_disabled() -> bool:
+    # decode-only implies SoA is required; otherwise honor the disable flag.
+    if _gguf_decode_only():
+        return False
+    return os.environ.get("VLLM_DISABLE_Q4_0_SOA", "0") == "1"
+
+
+def _free_param_data(param: torch.nn.Parameter) -> None:
+    """Shrink a parameter's storage to ~nothing while keeping its attrs."""
+    param.data = torch.empty(0, dtype=param.data.dtype, device=param.data.device)
 
 
 def _fused_moe_gguf(
@@ -618,20 +644,25 @@ class GGUFLinearMethod(LinearMethodBase):
             layer.register_parameter("qweight", padded_param)
             # Maxwell: build per-shard SoA Q4_0 buffers (qkv / gate_up).
             soa_shards = {}
-            for idx, (start, end, size) in shard_offset_map.items():
-                stype = layer.qweight_type.shard_weight_type.get(idx)
-                if stype is None or int(stype) != int(WeightType.Q4_0):
-                    continue
-                sw = padded_data[start:end, :size].contiguous()
-                srows = sw.shape[0]
-                sbpr = sw.shape[1] // 18
-                swb = sw.view(srows, sbpr, 18)
-                sq = swb[:, :, 2:18].contiguous().view(srows, sbpr * 16)
-                ss = swb[:, :, 0:2].contiguous().view(srows, sbpr * 2).view(
-                    torch.float16).contiguous()
-                soa_shards[idx] = (sq, ss)
+            if not _soa_disabled():
+                for idx, (start, end, size) in shard_offset_map.items():
+                    stype = layer.qweight_type.shard_weight_type.get(idx)
+                    if stype is None or int(stype) != int(WeightType.Q4_0):
+                        continue
+                    sw = padded_data[start:end, :size].contiguous()
+                    srows = sw.shape[0]
+                    sbpr = sw.shape[1] // 18
+                    swb = sw.view(srows, sbpr, 18)
+                    sq = swb[:, :, 2:18].contiguous().view(srows, sbpr * 16)
+                    ss = swb[:, :, 0:2].contiguous().view(srows, sbpr * 2).view(
+                        torch.float16).contiguous()
+                    soa_shards[idx] = (sq, ss)
             if soa_shards:
                 layer.qweight_soa_shards = soa_shards
+                if _gguf_decode_only() and len(soa_shards) == len(
+                        shard_offset_map):
+                    # all shards are Q4_0 SoA -> drop the padded AoS copy
+                    _free_param_data(layer.qweight)
 
     def apply(
         self,
@@ -650,7 +681,9 @@ class GGUFLinearMethod(LinearMethodBase):
             )
             qweight = layer.qweight
             soa_shards = getattr(layer, "qweight_soa_shards", None)
-            disable_soa = os.environ.get("VLLM_DISABLE_Q4_0_SOA", "0") == "1"
+            decode_only = _gguf_decode_only()
+            disable_soa = (not decode_only) and (
+                os.environ.get("VLLM_DISABLE_Q4_0_SOA", "0") == "1")
             result = []
             for idx in shard_id:
                 start, end, offset = layer.qweight.shard_offset_map[idx]
@@ -658,11 +691,14 @@ class GGUFLinearMethod(LinearMethodBase):
                 if (not disable_soa and soa_shards is not None
                         and idx in soa_shards):
                     sq, ss = soa_shards[idx]
+                    # In decode-only mode the AoS copy is freed; pass sq as an
+                    # unused placeholder for the (skipped) AoS fallback arg.
+                    aos = sq if decode_only else qweight[
+                        start:end, :offset].contiguous()
                     result.append(
                         fused_mul_mat_gguf_soa(
-                            x, sq, ss,
-                            qweight[start:end, :offset].contiguous(),
-                            qweight_type, sq.shape[0],
+                            x, sq, ss, aos, qweight_type, sq.shape[0],
+                            decode_only,
                         )
                     )
                 else:
@@ -677,13 +713,19 @@ class GGUFLinearMethod(LinearMethodBase):
             qweight = layer.qweight
             qweight_type = layer.qweight_type.weight_type
             if _has_q4_0_soa(layer):
+                decode_only = _gguf_decode_only()
+                row = getattr(layer, "qweight_soa_row", None)
+                if row is None:
+                    row = qweight.shape[0]
+                aos = layer.qweight_soa_quants if decode_only else qweight
                 out = fused_mul_mat_gguf_soa(
                     x,
                     layer.qweight_soa_quants,
                     layer.qweight_soa_scales,
-                    qweight,
+                    aos,
                     qweight_type,
-                    qweight.shape[0],
+                    row,
+                    decode_only,
                 )
             else:
                 out = fused_mul_mat_gguf(x, qweight, qweight_type)
@@ -807,6 +849,17 @@ class GGUFEmbeddingMethod(GGUFLinearMethod):
     Args:
         quant_config: The GGUF quantization config.
     """
+
+    def process_weights_after_loading(self, layer: torch.nn.Module):
+        # Embeddings use ggml_dequantize (not MMVQ/SoA) and read qweight.shape
+        # directly, so never build SoA buffers or free the AoS qweight here.
+        qweight_type = layer.qweight_type.weight_type
+        if not (qweight_type in UNQUANTIZED_TYPES or qweight_type in DEQUANT_TYPES):
+            qweight_type = WeightType(qweight_type)
+            raise ValueError(
+                f"Unsupported GGUF quantization type {qweight_type} in layer {layer}."
+            )
+        self._create_padded_weight_param(layer)
 
     def embedding(self, layer: torch.nn.Module, x: torch.Tensor) -> torch.Tensor:
         qweight = layer.qweight
