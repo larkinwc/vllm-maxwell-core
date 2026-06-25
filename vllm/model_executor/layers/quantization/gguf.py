@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from vllm.model_executor.layers.quantization import QuantizationMethods
 
+import os
 import gguf
 import torch
 from gguf import GGMLQuantizationType as WeightType
@@ -253,6 +254,71 @@ try:
 
 except AttributeError as error:
     raise error
+
+
+def _fused_mul_mat_gguf_soa(
+    x: torch.Tensor,
+    quants: torch.Tensor,
+    scales: torch.Tensor,
+    qweight: torch.Tensor,
+    qweight_type: int,
+    row: int,
+) -> torch.Tensor:
+    # Maxwell SoA Q4_0 path: 128-bit coalesced quant loads for the decode
+    # (vec) kernel. Prefill / large batch falls back to the AoS MMQ kernel.
+    mmvq_safe = 2 if row > 5120 else 6
+    if x.shape[0] == 0:
+        return torch.empty(x.shape[0], row, dtype=x.dtype, device=x.device)
+    if x.shape[0] <= mmvq_safe:
+        return ops.ggml_mul_mat_vec_a8_soa(quants, scales, x, row)
+    return ops.ggml_mul_mat_a8(qweight, x, qweight_type, row)
+
+
+def _fused_mul_mat_gguf_soa_fake(
+    x: torch.Tensor,
+    quants: torch.Tensor,
+    scales: torch.Tensor,
+    qweight: torch.Tensor,
+    qweight_type: int,
+    row: int,
+) -> torch.Tensor:
+    return torch.empty(x.shape[0], row, dtype=x.dtype, device=x.device)
+
+
+try:
+    direct_register_custom_op(
+        op_name="_fused_mul_mat_gguf_soa",
+        op_func=_fused_mul_mat_gguf_soa,
+        fake_impl=_fused_mul_mat_gguf_soa_fake,
+    )
+    fused_mul_mat_gguf_soa = torch.ops.vllm._fused_mul_mat_gguf_soa
+
+except AttributeError as error:
+    raise error
+
+
+def _maybe_build_q4_0_soa(layer: torch.nn.Module) -> None:
+    """Build SoA quants/scales for a non-sharded Q4_0 qweight, stash on layer."""
+    qweight = layer.qweight
+    if getattr(qweight, "shard_id", None):
+        return  # sharded (qkv/merged) layers stay on the AoS path
+    if int(layer.qweight_type.weight_type) != int(WeightType.Q4_0):
+        return
+    w = qweight.data
+    nrows = w.shape[0]
+    # each Q4_0 block = 18 bytes (2-byte half scale + 16 quant bytes)
+    bpr = w.shape[1] // 18
+    wb = w.view(nrows, bpr, 18)
+    quants = wb[:, :, 2:18].contiguous().view(nrows, bpr * 16)
+    scales = wb[:, :, 0:2].contiguous().view(nrows, bpr * 2).view(torch.float16)
+    layer.qweight_soa_quants = quants
+    layer.qweight_soa_scales = scales.contiguous()
+
+
+def _has_q4_0_soa(layer: torch.nn.Module) -> bool:
+    if os.environ.get("VLLM_DISABLE_Q4_0_SOA", "0") == "1":
+        return False
+    return getattr(layer, "qweight_soa_quants", None) is not None
 
 
 def _fused_moe_gguf(
@@ -510,6 +576,8 @@ class GGUFLinearMethod(LinearMethodBase):
         # For MergedColumnParallelLinear and QKVParallelLinear, we need to
         # materialize the padded weight parameter for CUDA Graph compatibility.
         self._create_padded_weight_param(layer)
+        # Maxwell: build SoA Q4_0 buffers for the decode mmvq fast path.
+        _maybe_build_q4_0_soa(layer)
 
     def _create_padded_weight_param(self, layer: torch.nn.Module):
         """Create padded weight parameter for GGUF MergedLinear layer."""
@@ -548,6 +616,22 @@ class GGUFLinearMethod(LinearMethodBase):
             set_weight_attrs(padded_param, vars(qweight))
             set_weight_attrs(padded_param, {"shard_offset_map": shard_offset_map})
             layer.register_parameter("qweight", padded_param)
+            # Maxwell: build per-shard SoA Q4_0 buffers (qkv / gate_up).
+            soa_shards = {}
+            for idx, (start, end, size) in shard_offset_map.items():
+                stype = layer.qweight_type.shard_weight_type.get(idx)
+                if stype is None or int(stype) != int(WeightType.Q4_0):
+                    continue
+                sw = padded_data[start:end, :size].contiguous()
+                srows = sw.shape[0]
+                sbpr = sw.shape[1] // 18
+                swb = sw.view(srows, sbpr, 18)
+                sq = swb[:, :, 2:18].contiguous().view(srows, sbpr * 16)
+                ss = swb[:, :, 0:2].contiguous().view(srows, sbpr * 2).view(
+                    torch.float16).contiguous()
+                soa_shards[idx] = (sq, ss)
+            if soa_shards:
+                layer.qweight_soa_shards = soa_shards
 
     def apply(
         self,
@@ -565,20 +649,44 @@ class GGUFLinearMethod(LinearMethodBase):
                 else sorted(shard_id, key=_gguf_shard_sort_key)
             )
             qweight = layer.qweight
+            soa_shards = getattr(layer, "qweight_soa_shards", None)
+            disable_soa = os.environ.get("VLLM_DISABLE_Q4_0_SOA", "0") == "1"
             result = []
             for idx in shard_id:
                 start, end, offset = layer.qweight.shard_offset_map[idx]
                 qweight_type = layer.qweight_type.shard_weight_type[idx]
-                result.append(
-                    fused_mul_mat_gguf(
-                        x, qweight[start:end, :offset].contiguous(), qweight_type
+                if (not disable_soa and soa_shards is not None
+                        and idx in soa_shards):
+                    sq, ss = soa_shards[idx]
+                    result.append(
+                        fused_mul_mat_gguf_soa(
+                            x, sq, ss,
+                            qweight[start:end, :offset].contiguous(),
+                            qweight_type, sq.shape[0],
+                        )
                     )
-                )
+                else:
+                    result.append(
+                        fused_mul_mat_gguf(
+                            x, qweight[start:end, :offset].contiguous(),
+                            qweight_type,
+                        )
+                    )
             out = torch.cat(result, axis=1)
         else:
             qweight = layer.qweight
             qweight_type = layer.qweight_type.weight_type
-            out = fused_mul_mat_gguf(x, qweight, qweight_type)
+            if _has_q4_0_soa(layer):
+                out = fused_mul_mat_gguf_soa(
+                    x,
+                    layer.qweight_soa_quants,
+                    layer.qweight_soa_scales,
+                    qweight,
+                    qweight_type,
+                    qweight.shape[0],
+                )
+            else:
+                out = fused_mul_mat_gguf(x, qweight, qweight_type)
         if bias is not None:
             out.add_(bias)
         return out

@@ -789,6 +789,15 @@ if hasattr(torch.ops._C, "ggml_dequantize"):
     ) -> torch.Tensor:
         return torch.empty((X.shape[0], row), dtype=X.dtype, device=W.device)
 
+    @register_fake("_C::ggml_mul_mat_vec_a8_soa")
+    def _ggml_mul_mat_vec_a8_soa_fake(
+        quants: torch.Tensor,
+        scales: torch.Tensor,
+        X: torch.Tensor,
+        row: torch.SymInt,
+    ) -> torch.Tensor:
+        return torch.empty((X.shape[0], row), dtype=X.dtype, device=quants.device)
+
     @register_fake("_C::ggml_mul_mat_a8")
     def _ggml_mul_mat_a8_fake(
         W: torch.Tensor,
@@ -2209,6 +2218,15 @@ def ggml_mul_mat_vec_a8(
     row: int,
 ) -> torch.Tensor:
     return torch.ops._C.ggml_mul_mat_vec_a8(W, X, quant_type, row)
+
+
+def ggml_mul_mat_vec_a8_soa(
+    quants: torch.Tensor,
+    scales: torch.Tensor,
+    X: torch.Tensor,
+    row: int,
+) -> torch.Tensor:
+    return torch.ops._C.ggml_mul_mat_vec_a8_soa(quants, scales, X, row)
 
 
 def ggml_mul_mat_a8(

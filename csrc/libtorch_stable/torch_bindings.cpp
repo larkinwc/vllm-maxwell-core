@@ -489,6 +489,11 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "ggml_mul_mat_vec_a8(Tensor W, Tensor X, int type, SymInt row) "
       "-> Tensor");
 
+  // SoA Q4_0 mmvq kernel for Maxwell (128-bit coalesced quant loads).
+  ops.def(
+      "ggml_mul_mat_vec_a8_soa(Tensor quants, Tensor scales, Tensor X, "
+      "SymInt row) -> Tensor");
+
   // mmq kernel for GGML.
   ops.def(
       "ggml_mul_mat_a8(Tensor W, Tensor X, int type, SymInt row) -> Tensor");
@@ -666,6 +671,7 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
   // GGML kernels
   ops.impl("ggml_dequantize", TORCH_BOX(&ggml_dequantize));
   ops.impl("ggml_mul_mat_vec_a8", TORCH_BOX(&ggml_mul_mat_vec_a8));
+  ops.impl("ggml_mul_mat_vec_a8_soa", TORCH_BOX(&ggml_mul_mat_vec_a8_soa));
   ops.impl("ggml_mul_mat_a8", TORCH_BOX(&ggml_mul_mat_a8));
   ops.impl("ggml_moe_a8", TORCH_BOX(&ggml_moe_a8));
   ops.impl("ggml_moe_a8_vec", TORCH_BOX(&ggml_moe_a8_vec));
