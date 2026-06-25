@@ -716,11 +716,32 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
 
         if is_gguf_weight:
             output_dim = getattr(param, "output_dim", None)
-            shard_size = loaded_weight.size(output_dim) // self.tp_size
-            start_idx = self.tp_rank * shard_size
 
             if loaded_shard_id is not None:
-                loaded_weight = loaded_weight.narrow(output_dim, start_idx, shard_size)
+                if isinstance(loaded_shard_id, tuple):
+                    # GGUF-TUPLE-TP-FIX: a pre-fused GGUF tensor covering
+                    # several consecutive output shards (e.g. Qwen3.5 GDN qkv
+                    # -> qkvz shards (0,1,2)). The sub-shards have unequal sizes
+                    # so narrow each sub-block independently for TP instead of
+                    # slicing the concatenated tensor contiguously (which would
+                    # scramble q/k/v across ranks at TP>=2).
+                    parts = []
+                    off = 0
+                    for _sid in loaded_shard_id:
+                        _sz = self.output_sizes[_sid]
+                        _full = loaded_weight.narrow(output_dim, off, _sz)
+                        _ss = _sz // self.tp_size
+                        parts.append(
+                            _full.narrow(output_dim, self.tp_rank * _ss, _ss)
+                        )
+                        off += _sz
+                    loaded_weight = torch.cat(parts, dim=output_dim)
+                else:
+                    shard_size = loaded_weight.size(output_dim) // self.tp_size
+                    start_idx = self.tp_rank * shard_size
+                    loaded_weight = loaded_weight.narrow(
+                        output_dim, start_idx, shard_size
+                    )
                 param.shard_id.append(loaded_shard_id)
                 param.shard_id_map[loaded_shard_id] = len(param.data_container)
                 param.data_container.append(loaded_weight)
