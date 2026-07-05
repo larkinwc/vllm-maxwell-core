@@ -224,6 +224,12 @@ class Qwen3_5Model(Qwen3NextModel):
         self.embed_tokens = VocabParallelEmbedding(
             self.vocab_size,
             config.hidden_size,
+            # Wire quant_config/prefix so GGUF-quantized embed_tokens weights
+            # (embed_tokens.qweight / .qweight_type) can bind. Without this the
+            # GGUF embedding weights are silently skipped, leaving random
+            # embeddings and garbage output. Mirrors the ParallelLMHead wiring.
+            quant_config=vllm_config.quant_config,
+            prefix=maybe_prefix(prefix, "embed_tokens"),
         )
 
         def get_layer(prefix: str):
@@ -425,6 +431,16 @@ class Qwen3_5Model(Qwen3NextModel):
                     weight_loader = getattr(
                         param, "weight_loader", default_weight_loader
                     )
+                    # GGUF stores depthwise conv1d weights as 2D [C, K], but the
+                    # vLLM param is 3D [C, 1, K] (Conv1d weight shape preserved).
+                    # Unsqueeze so mamba_v2_sharded_weight_loader can slice.
+                    if (
+                        "conv1d.weight" in name
+                        and hasattr(loaded_weight, "ndim")
+                        and hasattr(param, "data")
+                        and loaded_weight.ndim + 1 == param.data.ndim
+                    ):
+                        loaded_weight = loaded_weight.unsqueeze(1)
                     weight_loader(param, loaded_weight)
             loaded_params.add(name)
         return loaded_params
@@ -525,12 +541,54 @@ class Qwen3_5ForCausalLMBase(
         )
         return loader.load_weights(weights)
 
+    # The text-only Qwen3_5ForCausalLM (and its MoE sibling) need the IsHybrid
+    # hooks so that the platform-wide `_align_hybrid_block_size` pass can see
+    # the GDN state shape / dtype and enlarge the attention block_size / pad the
+    # mamba page until they match. These mirror the helpers on
+    # Qwen3_5ForConditionalGeneration so the numbers stay in sync.
+    @classmethod
+    def get_mamba_state_dtype_from_config(
+        cls,
+        vllm_config: "VllmConfig",
+    ) -> tuple[torch.dtype, torch.dtype]:
+        return MambaStateDtypeCalculator.gated_delta_net_state_dtype(
+            vllm_config.model_config.dtype,
+            vllm_config.cache_config.mamba_cache_dtype,
+            vllm_config.cache_config.mamba_ssm_cache_dtype,
+        )
 
-class Qwen3_5ForCausalLM(Qwen3_5ForCausalLMBase):
+    @classmethod
+    def get_mamba_state_shape_from_config(
+        cls, vllm_config: "VllmConfig"
+    ) -> tuple[tuple[int, int], tuple[int, int]]:
+        parallel_config = vllm_config.parallel_config
+        hf_config = vllm_config.model_config.hf_text_config
+        tp_size = parallel_config.tensor_parallel_size
+        num_spec = (
+            vllm_config.speculative_config.num_speculative_tokens
+            if vllm_config.speculative_config
+            else 0
+        )
+        return MambaStateShapeCalculator.gated_delta_net_state_shape(
+            tp_size,
+            hf_config.linear_num_key_heads,
+            hf_config.linear_num_value_heads,
+            hf_config.linear_key_head_dim,
+            hf_config.linear_value_head_dim,
+            hf_config.linear_conv_kernel_dim,
+            num_spec,
+        )
+
+    @classmethod
+    def get_mamba_state_copy_func(cls) -> tuple[MambaStateCopyFunc, MambaStateCopyFunc]:
+        return MambaStateCopyFuncCalculator.gated_delta_net_state_copy_func()
+
+
+class Qwen3_5ForCausalLM(Qwen3_5ForCausalLMBase, IsHybrid):
     pass
 
 
-class Qwen3_5MoeForCausalLM(Qwen3_5ForCausalLMBase, QwenNextMixtureOfExperts):
+class Qwen3_5MoeForCausalLM(Qwen3_5ForCausalLMBase, QwenNextMixtureOfExperts, IsHybrid):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
 
