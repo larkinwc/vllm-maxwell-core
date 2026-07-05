@@ -121,9 +121,25 @@ class GGUFModelLoader(BaseModelLoader):
         # models, this returns config itself.
         text_config = config.get_text_config()
         model_type = config.model_type
+        # A model may declare a vision_config in its HF config yet ship a
+        # text-only GGUF (no companion mmproj file and no vision tensors).
+        # Only treat it as multimodal when an actual mmproj GGUF is present,
+        # otherwise force the text-only load path. This avoids reading vision
+        # attributes (e.g. Qwen3.5's Qwen3_5VisionConfig.depth) and mapping
+        # vision params that do not exist in a text-only GGUF.
+        has_mmproj = detect_gguf_multimodal(model_config.model) is not None
         is_multimodal = (
-            hasattr(config, "vision_config") and config.vision_config is not None
+            hasattr(config, "vision_config")
+            and config.vision_config is not None
+            and has_mmproj
         )
+        if not is_multimodal:
+            # Use the text backbone config for arch/layer lookups and dummy
+            # model construction. Keep the GGUF architecture name resolution
+            # below (model_type -> gguf arch) driven by the top-level
+            # model_type, since the text sub-config may carry a "_text"
+            # suffixed model_type that the gguf lib does not know about.
+            config = text_config
         gguf_to_hf_name_map = {}
         sideload_params: list[re.Pattern] = []
         # hack: ggufs have a different name than transformers
@@ -133,6 +149,21 @@ class GGUFModelLoader(BaseModelLoader):
             # Gemma3 models use "gemma3_text" in HuggingFace but
             # "gemma3" in GGUF architecture naming
             model_type = "gemma3"
+        if model_type == "qwen3_5":
+            # Qwen3.5 hybrid models use "qwen3_5" in HuggingFace but
+            # "qwen35" in GGUF architecture naming (gguf lib MODEL_ARCH_NAMES).
+            model_type = "qwen35"
+            # The gguf lib's qwen35 tensor map exposes SSM_DT only via the
+            # `linear_attn.dt_proj` HF alias (a projection weight), but vLLM's
+            # Qwen3.5 Gated-DeltaNet module stores the timestep bias as the
+            # parameter `linear_attn.dt_bias`, which the GGUF stores as
+            # `blk.N.ssm_dt.bias`. Map it manually for the linear-attention
+            # (Mamba) layers. Entries for full-attention layers (which have no
+            # such GGUF tensor) are simply never consumed.
+            for idx in range(text_config.num_hidden_layers):
+                gguf_to_hf_name_map[f"blk.{idx}.ssm_dt.bias"] = (
+                    f"model.layers.{idx}.linear_attn.dt_bias"
+                )
         if model_type in ("deepseek_v3", "deepseek_v2"):
             model_type = "deepseek2"
             # GGUF layer map assumes that we will have a merged expert weights
@@ -312,6 +343,13 @@ class GGUFModelLoader(BaseModelLoader):
             if gguf_name is None:
                 return None
 
+            # Some parameters (e.g. Qwen3.5 Gated-DeltaNet `A_log`) have no
+            # `.weight`/`.bias` suffix. In that case the GGUF tensor name is the
+            # bare mapped name; appending a trailing '.' would produce a key
+            # (e.g. `blk.0.ssm_a.`) that never matches the real tensor
+            # (`blk.0.ssm_a`), silently leaving the parameter uninitialized.
+            if suffix == "":
+                return gguf_name
             return gguf_name + "." + suffix
 
         # Build mapping and track unmapped parameters
@@ -342,6 +380,14 @@ class GGUFModelLoader(BaseModelLoader):
                 f"({len(unmapped_params)}): "
                 f"{unmapped_params}"
             )
+        # NOTE: For text-only qwen35 GGUFs we now route to the text-only
+        # `Qwen3_5ForCausalLM` class (registered in registry.py and selected via
+        # hf_overrides architectures). That class emits flat `model.layers.*` /
+        # `lm_head.*` parameter names, which match the GGUF text mapper directly,
+        # so the previous `model.language_model.` re-nest (needed only for the
+        # multimodal Qwen3_5ForConditionalGeneration wrapper) is intentionally
+        # not applied here.
+
         return gguf_to_hf_name_map
 
     def _get_gguf_weight_type(
@@ -354,12 +400,14 @@ class GGUFModelLoader(BaseModelLoader):
         weight_type_map = {}
         for f in gguf_files:
             weight_type_map.update(get_gguf_weight_type_map(f, gguf_to_hf_name_map))
-        is_multimodal = hasattr(model_config.hf_config, "vision_config")
+        # Only multimodal when a companion mmproj GGUF actually exists; a model
+        # may declare vision_config in HF config yet ship a text-only GGUF.
+        mmproj_file = detect_gguf_multimodal(model_name_or_path)
+        is_multimodal = (
+            hasattr(model_config.hf_config, "vision_config")
+            and mmproj_file is not None
+        )
         if is_multimodal:
-            mmproj_file = detect_gguf_multimodal(model_name_or_path)
-            assert mmproj_file is not None, (
-                "Could not find mm_proj file for multimodal GGUF model"
-            )
             logger.info("Loading extra mm_proj weights from %s...", mmproj_file)
             mm_proj_weight_type_map = get_gguf_weight_type_map(
                 mmproj_file, gguf_to_hf_name_map
@@ -385,14 +433,15 @@ class GGUFModelLoader(BaseModelLoader):
             Tuples of (parameter_name, tensor) for all model weights
         """
         hf_config = model_config.hf_config
-        is_multimodal = hasattr(hf_config, "vision_config")
+        # Only multimodal when a companion mmproj GGUF actually exists; a model
+        # may declare vision_config in HF config yet ship a text-only GGUF.
+        mmproj_file = detect_gguf_multimodal(model_name_or_path)
+        is_multimodal = (
+            hasattr(hf_config, "vision_config") and mmproj_file is not None
+        )
 
         if is_multimodal:
             # Load mm_proj (mm_encoder + projector) for multimodal weights
-            mmproj_file = detect_gguf_multimodal(model_name_or_path)
-            assert mmproj_file is not None, (
-                "Could not find mm_proj file for multimodal GGUF model"
-            )
             yield from gguf_quant_weights_iterator(mmproj_file, gguf_to_hf_name_map)
 
         gguf_files = self._get_all_gguf_files(model_name_or_path)
