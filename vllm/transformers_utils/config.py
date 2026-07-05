@@ -547,6 +547,19 @@ def _uses_mrope(config: PretrainedConfig) -> bool:
 
 def uses_mrope(config: PretrainedConfig) -> bool:
     """Detect if the model with this config uses M-ROPE."""
+    # Maxwell/sm_50 GGUF patch: when we force-override the multimodal Qwen3.5
+    # config to the text-only Qwen3_5ForCausalLM, the HF config still carries
+    # `mrope_section` in text_config.rope_parameters. That flips uses_mrope()
+    # on, which trips `supports_mrope(model)` in gpu_model_runner because the
+    # plain text-only class can't implement M-RoPE. Short-circuit to False for
+    # the overridden text-only architectures.
+    architectures = getattr(config, "architectures", None) or []
+    text_only_overrides = {
+        "Qwen3_5ForCausalLM",
+        "Qwen3_5MoeForCausalLM",
+    }
+    if any(a in text_only_overrides for a in architectures):
+        return False
     return (
         _uses_mrope(config)
         or _uses_mrope(config.get_text_config())
@@ -657,12 +670,21 @@ def maybe_override_with_speculators(
     else:
         gguf_model_repo = None
     kwargs["local_files_only"] = huggingface_hub.constants.HF_HUB_OFFLINE
-    config_dict, _ = PretrainedConfig.get_config_dict(
-        model if gguf_model_repo is None else gguf_model_repo,
-        revision=revision,
-        token=hf_token,
-        **without_trust_remote_code(kwargs),
-    )
+    try:
+        config_dict, _ = PretrainedConfig.get_config_dict(
+            model if gguf_model_repo is None else gguf_model_repo,
+            revision=revision,
+            token=hf_token,
+            **without_trust_remote_code(kwargs),
+        )
+    except ValueError as e:
+        # GGUF files whose architecture transformers' GGUF parser does not yet
+        # support (e.g. qwen35) raise here. Speculators configs never live in a
+        # GGUF anyway, so skip speculator overrides gracefully instead of
+        # crashing engine startup. See vllm-project/vllm#36456.
+        if gguf_model_repo is not None and "is not supported yet" in str(e):
+            return model, tokenizer, vllm_speculative_config
+        raise
     speculators_config = config_dict.get("speculators_config")
 
     if speculators_config is None:
@@ -858,6 +880,26 @@ def get_config(
     if hf_overrides_fn:
         logger.debug("Overriding HF config with %s", hf_overrides_fn)
         config = hf_overrides_fn(config)
+
+    # Maxwell/sm_50 GGUF patch: when we force the multimodal Qwen3.5 config to
+    # the text-only `Qwen3_5ForCausalLM` via hf_overrides architectures, the
+    # rope_parameters still carry `mrope_section` / `mrope_interleaved`. Down
+    # the stack, `get_rope()` picks `MRotaryEmbedding` purely on the presence
+    # of `mrope_section` in rope_parameters, even when scaling_type == "default".
+    # The text-only model then receives 1D position ids from gpu_model_runner
+    # (our `uses_mrope` -> False patch) but RoPE expects 3D, which silently
+    # corrupts every forward pass and produces pure-gibberish outputs. Strip the
+    # mrope-specific keys from rope_parameters to force a plain RotaryEmbedding.
+    _text_only_archs = {"Qwen3_5ForCausalLM", "Qwen3_5MoeForCausalLM"}
+    _archs = getattr(config, "architectures", None) or []
+    if any(a in _text_only_archs for a in _archs):
+        def _strip_mrope(cfg):
+            rp = getattr(cfg, "rope_parameters", None)
+            if isinstance(rp, dict):
+                for k in ("mrope_section", "mrope_interleaved"):
+                    rp.pop(k, None)
+        _strip_mrope(config)
+        _strip_mrope(config.get_text_config())
 
     # Exhaustively patch RoPE parameters everywhere they might be
     patch_rope_parameters(config)
