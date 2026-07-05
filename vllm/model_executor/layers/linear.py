@@ -700,9 +700,32 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
         if isinstance(loaded_shard_id, tuple) and (
             is_gguf_weight or is_gguf_weight_type
         ):
-            raise NotImplementedError(
-                "Shard id with multiple indices is not supported for GGUF."
-            )
+            # GGUF sometimes stores a pre-fused tensor that spans several
+            # consecutive output shards (e.g. Qwen3.5 Gated-DeltaNet
+            # `in_proj_qkv` covers shards (0, 1, 2) of `in_proj_qkvz`). Split
+            # it along the output dim and recurse with a single-int shard_id
+            # per piece so the existing GGUF path stashes one data_container
+            # entry per shard as expected.
+            if is_gguf_weight_type:
+                # weight_type is a scalar — replicate for every shard.
+                for sub_id in loaded_shard_id:
+                    self.weight_loader(param, loaded_weight, sub_id)
+                return
+            output_dim = getattr(param, "output_dim", None)
+            if output_dim is None:
+                raise NotImplementedError(
+                    "Shard id with multiple indices is not supported for "
+                    "GGUF without an output_dim on the parameter."
+                )
+            current_offset = 0
+            for sub_id in loaded_shard_id:
+                sub_size = self.output_sizes[sub_id]
+                sub_weight = loaded_weight.narrow(
+                    output_dim, current_offset, sub_size
+                )
+                current_offset += sub_size
+                self.weight_loader(param, sub_weight, sub_id)
+            return
         if is_gguf_weight_type:
             if loaded_shard_id is not None:
                 param.data[loaded_shard_id].copy_(loaded_weight)
@@ -1201,10 +1224,23 @@ class QKVParallelLinear(ColumnParallelLinear):
 
         if is_gguf_weight:
             output_dim = getattr(param, "output_dim", None)
-            shard_size = loaded_weight.size(output_dim) // self.tp_size
-            start_idx = self.tp_rank * shard_size
 
             if loaded_shard_id is not None:
+                if loaded_shard_id == "q" or self.num_kv_head_replicas == 1:
+                    # q heads (and k/v when total_num_kv_heads >= tp_size)
+                    # partition evenly across TP ranks.
+                    shard_size = loaded_weight.size(output_dim) // self.tp_size
+                    start_idx = self.tp_rank * shard_size
+                else:
+                    # total_num_kv_heads < tp_size: KV heads are REPLICATED
+                    # (num_kv_head_replicas ranks share one KV head). Select the
+                    # single KV head assigned to this rank instead of slicing a
+                    # fractional piece (which produced mismatched shard sizes).
+                    shard_size = (
+                        loaded_weight.size(output_dim) // self.total_num_kv_heads
+                    )
+                    kv_head_idx = self.tp_rank // self.num_kv_head_replicas
+                    start_idx = kv_head_idx * shard_size
                 loaded_weight = loaded_weight.narrow(output_dim, start_idx, shard_size)
                 param.shard_id.append(loaded_shard_id)
                 param.shard_id_map[loaded_shard_id] = len(param.data_container)
