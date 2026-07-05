@@ -3,9 +3,11 @@
 """Inference-only Qwen3-Next/Qwen3.5 model."""
 
 import functools
+import os
 from typing import Literal
 
 import torch
+import torch.nn.functional as _F
 from einops import rearrange
 from torch import nn
 
@@ -287,6 +289,165 @@ def fi_chunk_gated_delta_rule(
         return result.unsqueeze(0), None
 
 
+def _torch_causal_conv1d_prefill(
+    x: torch.Tensor,            # [conv_dim, L] packed over sequences
+    weight: torch.Tensor,       # [conv_dim, K]
+    bias: torch.Tensor | None,
+    activation: str | None,
+    conv_state: torch.Tensor,   # [num_blocks, conv_dim, K-1] (cache)
+    has_initial_state: torch.Tensor | None,
+    cache_indices: torch.Tensor | None,
+    query_start_loc: torch.Tensor | None,
+):
+    """Pure-torch depthwise causal conv1d for the GDN prefill path.
+
+    Mirrors llama.cpp / HF ``nn.Conv1d`` semantics (the Triton
+    ``causal_conv1d_fn`` numerically attenuates on Maxwell). Processes each
+    packed sequence independently, prepends cached left-context when present,
+    applies the activation, and writes the trailing ``K-1`` columns back into
+    ``conv_state`` for subsequent decode steps.
+    """
+    conv_dim, total = x.shape
+    K = weight.shape[-1]
+    if query_start_loc is None:
+        cu = torch.tensor([0, total], device=x.device, dtype=torch.long)
+    else:
+        cu = query_start_loc.to(torch.long)
+    N = cu.numel() - 1
+    w = weight.to(torch.float32)                    # [conv_dim, K]
+    out = torch.empty_like(x)
+    for n in range(N):
+        s = int(cu[n].item())
+        e = int(cu[n + 1].item())
+        seg = x[:, s:e].to(torch.float32)           # [conv_dim, Ln]
+        Ln = e - s
+        # Assemble left context: cached state if this sequence continues.
+        if (
+            has_initial_state is not None
+            and cache_indices is not None
+            and bool(has_initial_state[n].item())
+        ):
+            idx = int(cache_indices[n].item())
+            left = conv_state[idx].to(torch.float32)  # [conv_dim, K-1]
+        else:
+            left = torch.zeros(conv_dim, K - 1, device=x.device, dtype=torch.float32)
+        padded = torch.cat([left, seg], dim=-1)       # [conv_dim, K-1+Ln]
+        # Depthwise conv: y[t] = sum_j w[:,j] * padded[:, t+j]
+        y = _F.conv1d(
+            padded.unsqueeze(0),
+            w.unsqueeze(1),
+            bias=bias.to(torch.float32) if bias is not None else None,
+            groups=conv_dim,
+        ).squeeze(0)                                  # [conv_dim, Ln]
+        if os.environ.get("MAXWELL_NAN_DEBUG") and n == 0:
+            _pre = y.float().abs().max().item()
+            # locate the input channel with the largest |value|
+            _pc = seg.abs().max(-1).values  # [conv_dim]
+            _ch = int(_pc.argmax().item())
+            logger.warning("[GDN_TCONV] seg_in absmax=%.4g conv_pre_act absmax=%.4g maxch=%d seg_row=%s w_row=%s",
+                           seg.abs().max().item(), _pre, _ch,
+                           [round(float(v),2) for v in seg[_ch, :].tolist()],
+                           [round(float(v),4) for v in w[_ch, :].tolist()])
+        if activation in ("silu", "swish"):
+            y = _F.silu(y)
+        elif activation == "sigmoid":
+            y = torch.sigmoid(y)
+        out[:, s:e] = y.to(out.dtype)
+        # Update conv_state with the last K-1 input columns (incl. left ctx).
+        if cache_indices is not None:
+            idx = int(cache_indices[n].item())
+            tail = padded[:, -(K - 1):] if padded.shape[-1] >= (K - 1) else _F.pad(
+                padded, (K - 1 - padded.shape[-1], 0)
+            )
+            conv_state[idx].copy_(tail[:, -(K - 1):].to(conv_state.dtype))
+    return out
+
+
+def _torch_chunk_gated_delta_rule(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    g: torch.Tensor,
+    beta: torch.Tensor,
+    initial_state: torch.Tensor,
+    output_final_state: bool,
+    cu_seqlens: torch.Tensor | None = None,
+    use_qk_l2norm_in_kernel: bool = True,
+    core_attn_out: torch.Tensor | None = None,
+):
+    """Pure-torch sequential gated-delta-rule scan (Maxwell fallback).
+
+    Shapes (packed, batch dim = 1):
+        q, k: [1, L, H,  Kd]
+        v:    [1, L, HV, Vd]      (GVA: HV = H * r)
+        g, beta: [1, L, HV]
+        initial_state: [N, HV, Vd, Kd]  (N = num sequences = len(cu_seqlens)-1)
+    Returns (out [1, L, HV, Vd], final_state [N, HV, Vd, Kd]).
+    ``g`` holds log-decays; per step the state decays by exp(g).
+    """
+    dev = q.device
+    q = q.squeeze(0).float()
+    k = k.squeeze(0).float()
+    v = v.squeeze(0).float()
+    g = g.squeeze(0).float()
+    beta = beta.squeeze(0).float()
+
+    L, H, Kd = q.shape
+    HV, Vd = v.shape[1], v.shape[2]
+    r = HV // H
+
+    if use_qk_l2norm_in_kernel:
+        q = q * torch.rsqrt(q.pow(2).sum(-1, keepdim=True) + 1e-6)
+        k = k * torch.rsqrt(k.pow(2).sum(-1, keepdim=True) + 1e-6)
+
+    # Query scaling (matches the FLA/HF kernels: scale = 1/sqrt(head_k_dim)).
+    q = q * (Kd ** -0.5)
+
+    # Expand K heads to V heads (GVA) so every V head has its own q/k.
+    if r > 1:
+        q = q.repeat_interleave(r, dim=1)   # [L, HV, Kd]
+        k = k.repeat_interleave(r, dim=1)
+
+    if cu_seqlens is None:
+        cu_seqlens = torch.tensor([0, L], device=dev, dtype=torch.long)
+    else:
+        cu_seqlens = cu_seqlens.to(torch.long)
+    N = cu_seqlens.numel() - 1
+
+    out = torch.empty(L, HV, Vd, device=dev, dtype=torch.float32)
+    final_state = torch.empty(N, HV, Vd, Kd, device=dev, dtype=torch.float32)
+
+    for n in range(N):
+        s = int(cu_seqlens[n].item())
+        e = int(cu_seqlens[n + 1].item())
+        # state: [HV, Vd, Kd]
+        if initial_state is not None:
+            S = initial_state[n].float().clone()
+        else:
+            S = torch.zeros(HV, Vd, Kd, device=dev, dtype=torch.float32)
+        for t in range(s, e):
+            decay = g[t].exp().view(HV, 1, 1)          # [HV,1,1]
+            S = S * decay
+            k_t = k[t]                                  # [HV, Kd]
+            v_t = v[t]                                  # [HV, Vd]
+            b_t = beta[t].view(HV, 1)                   # [HV, 1]
+            # kv_mem = S @ k_t : [HV, Vd]
+            kv_mem = torch.einsum("hvk,hk->hv", S, k_t)
+            delta = (v_t - kv_mem) * b_t                # [HV, Vd]
+            S = S + torch.einsum("hv,hk->hvk", delta, k_t)
+            q_t = q[t]                                  # [HV, Kd]
+            out[t] = torch.einsum("hvk,hk->hv", S, q_t)
+        final_state[n] = S
+
+    out = out.unsqueeze(0)
+    if core_attn_out is not None:
+        o_flat = out.reshape(-1)
+        co_flat = core_attn_out.reshape(-1)
+        co_flat[: o_flat.numel()].copy_(o_flat.to(core_attn_out.dtype))
+    fs = final_state if output_final_state else None
+    return out, fs
+
+
 @CustomOp.register("chunk_gated_delta_rule")
 class ChunkGatedDeltaRule(CustomOp):
     def __init__(self) -> None:
@@ -357,7 +518,11 @@ class ChunkGatedDeltaRule(CustomOp):
         use_qk_l2norm_in_kernel: bool = True,
         core_attn_out: torch.Tensor | None = None,
     ):
-        return fla_chunk_gated_delta_rule(
+        # The FLA Triton chunk kernel is numerically broken on Maxwell
+        # (sm_50): it produces near-zero output during prefill. Use a pure
+        # torch sequential gated-delta-rule scan instead. This mirrors the
+        # HF reference recurrence and is exact (fp32).
+        return _torch_chunk_gated_delta_rule(
             q=q,
             k=k,
             v=v,
@@ -366,8 +531,6 @@ class ChunkGatedDeltaRule(CustomOp):
             initial_state=initial_state,
             output_final_state=output_final_state,
             cu_seqlens=cu_seqlens,
-            chunk_indices=chunk_indices,
-            chunk_offsets=chunk_offsets,
             use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
             core_attn_out=core_attn_out,
         )
@@ -863,7 +1026,13 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         z_shape_og = z.shape
         core_attn_out = core_attn_out.reshape(-1, core_attn_out.shape[-1])
         z = z.reshape(-1, z.shape[-1])
+        if __import__("os").environ.get("MAXWELL_NAN_DEBUG") and str(getattr(self, "prefix", "")).endswith(".0.linear_attn"):
+            logger.warning("[GDN_P3] L0 pre-norm core=%.4g z=%.4g",
+                           core_attn_out.float().abs().max().item(), z.float().abs().max().item())
         core_attn_out = self.norm(core_attn_out, z)
+        if __import__("os").environ.get("MAXWELL_NAN_DEBUG") and str(getattr(self, "prefix", "")).endswith(".0.linear_attn"):
+            logger.warning("[GDN_P3] L0 post-norm=%.4g out_proj_next",
+                           core_attn_out.float().abs().max().item())
         core_attn_out = core_attn_out.reshape(z_shape_og)
         core_attn_out = core_attn_out.flatten(-2)  # ... h d -> ... (h d)
         output[:num_tokens], _ = self.out_proj(core_attn_out)
@@ -922,6 +1091,14 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         # ============================================================
         mixed_qkvz, _ = self.in_proj_qkvz(hidden_states)
         ba, _ = self.in_proj_ba(hidden_states)
+
+        if __import__("os").environ.get("MAXWELL_NAN_DEBUG") and str(getattr(self, "prefix", "")).endswith(".0.linear_attn"):
+            import torch as _t
+            logger.warning("[GDN_PROJ] L0 hs nan=%s absmax=%.4g | qkvz nan=%s absmax=%.4g | ba nan=%s absmax=%.4g | gqa_inter=%s",
+                           _t.isnan(hidden_states).any().item(), hidden_states.float().abs().max().item(),
+                           _t.isnan(mixed_qkvz).any().item(), mixed_qkvz.float().abs().max().item(),
+                           _t.isnan(ba).any().item(), ba.float().abs().max().item(),
+                           self.gqa_interleaved_layout)
 
         if self.gqa_interleaved_layout:
             # Qwen3-Next: unpack the interleaved GQA layout
@@ -1010,6 +1187,9 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         # Reshape input data into 2D tensor
         core_attn_out = core_attn_out.reshape(-1, core_attn_out.shape[-1])
         z = z.reshape(-1, z.shape[-1])
+        if __import__("os").environ.get("MAXWELL_NAN_DEBUG") and str(getattr(self, "prefix", "")).endswith(".0.linear_attn"):
+            logger.warning("[GDN_P3B] L0 pre-norm core=%.4g z=%.4g",
+                           core_attn_out.float().abs().max().item(), z.float().abs().max().item())
         core_attn_out = self.norm(core_attn_out, z)
         core_attn_out = core_attn_out.reshape(z_shape_og)
         core_attn_out = core_attn_out.flatten(-2)  # ... h d -> ... (h d)
@@ -1360,19 +1540,56 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         if attn_metadata.num_prefills > 0:
             assert mixed_qkv_non_spec is not None
             mixed_qkv_non_spec_T = mixed_qkv_non_spec.transpose(0, 1)
+            if __import__("os").environ.get("MAXWELL_NAN_DEBUG") and str(getattr(self, "prefix", "")).endswith(".0.linear_attn"):
+                import torch as _t
+                _kd = self.key_dim // self.tp_size
+                _vd = self.value_dim // self.tp_size
+                _mt = mixed_qkv_non_spec_T  # [conv_dim, L]
+                logger.warning("[GDN_CONV] L0 conv_IN nan=%s absmax=%.4g q=%.4g k=%.4g v=%.4g | cw absmax=%.4g | act=%s",
+                               _t.isnan(_mt).any().item(),
+                               _mt.float().abs().max().item(),
+                               _mt[:_kd].float().abs().max().item(),
+                               _mt[_kd:2*_kd].float().abs().max().item(),
+                               _mt[2*_kd:2*_kd+_vd].float().abs().max().item(),
+                               conv_weights.float().abs().max().item(),
+                               self.activation)
             # - "cache_indices" updates the conv_state cache in positions
             #   pointed to by "state_indices_tensor"
-            mixed_qkv_non_spec = causal_conv1d_fn(
-                mixed_qkv_non_spec_T,
-                conv_weights,
-                self.conv1d.bias,
-                activation=self.activation,
-                conv_states=conv_state,
-                has_initial_state=has_initial_state,
-                cache_indices=non_spec_state_indices_tensor,
-                query_start_loc=non_spec_query_start_loc,
-                metadata=attn_metadata,
-            ).transpose(0, 1)
+            if os.environ.get("MAXWELL_TORCH_CONV") == "1":
+                if str(getattr(self, "prefix", "")).endswith(".0.linear_attn"):
+                    logger.warning("[GDN_TORCHCONV] L0 taking torch conv path")
+                mixed_qkv_non_spec = _torch_causal_conv1d_prefill(
+                    mixed_qkv_non_spec_T,
+                    conv_weights,
+                    self.conv1d.bias,
+                    self.activation,
+                    conv_state,
+                    has_initial_state,
+                    non_spec_state_indices_tensor,
+                    non_spec_query_start_loc,
+                ).transpose(0, 1)
+            else:
+                mixed_qkv_non_spec = causal_conv1d_fn(
+                    mixed_qkv_non_spec_T,
+                    conv_weights,
+                    self.conv1d.bias,
+                    activation=self.activation,
+                    conv_states=conv_state,
+                    has_initial_state=has_initial_state,
+                    cache_indices=non_spec_state_indices_tensor,
+                    query_start_loc=non_spec_query_start_loc,
+                    metadata=attn_metadata,
+                ).transpose(0, 1)
+            if __import__("os").environ.get("MAXWELL_NAN_DEBUG") and str(getattr(self, "prefix", "")).endswith(".0.linear_attn"):
+                import torch as _t2
+                _co = mixed_qkv_non_spec  # [L, conv_dim]
+                _kd2 = self.key_dim // self.tp_size
+                _vd2 = self.value_dim // self.tp_size
+                logger.warning("[GDN_CONVOUT] L0 conv_OUT absmax=%.4g q=%.4g k=%.4g v=%.4g",
+                               _co.float().abs().max().item(),
+                               _co[:, :_kd2].float().abs().max().item(),
+                               _co[:, _kd2:2*_kd2].float().abs().max().item(),
+                               _co[:, 2*_kd2:2*_kd2+_vd2].float().abs().max().item())
         elif attn_metadata.num_decodes > 0:
             assert mixed_qkv_non_spec is not None
             mixed_qkv_non_spec = causal_conv1d_update(
@@ -1442,6 +1659,15 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             value_non_spec = value_non_spec.unsqueeze(0)
             g_non_spec = g_non_spec.unsqueeze(0)
             beta_non_spec = beta_non_spec.unsqueeze(0)
+            if __import__("os").environ.get("MAXWELL_NAN_DEBUG") and str(getattr(self, "prefix", "")).endswith(".0.linear_attn"):
+                import torch as _t
+                def _s(n, x):
+                    logger.warning("[GDN_CORE] L0 %s nan=%s inf=%s absmax=%.4g", n,
+                                   _t.isnan(x).any().item(), _t.isinf(x).any().item(),
+                                   x.float().abs().max().item())
+                _s("conv_out", conv_output_prefill)
+                _s("q", query_non_spec); _s("k", key_non_spec); _s("v", value_non_spec)
+                _s("g", g_non_spec); _s("beta", beta_non_spec)
         else:
             query_non_spec, key_non_spec, value_non_spec = self.rearrange_mixed_qkv(
                 mixed_qkv_non_spec
@@ -1528,6 +1754,12 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 chunk_offsets=attn_metadata.chunk_offsets,
                 use_qk_l2norm_in_kernel=False,
             )
+            if __import__("os").environ.get("MAXWELL_NAN_DEBUG") and str(getattr(self, "prefix", "")).endswith(".0.linear_attn"):
+                import torch as _t
+                logger.warning("[GDN_CORE] L0 chunk_out nan=%s inf=%s absmax=%.4g",
+                               _t.isnan(core_attn_out_non_spec).any().item(),
+                               _t.isinf(core_attn_out_non_spec).any().item(),
+                               core_attn_out_non_spec.float().abs().max().item())
             # Init cache
             ssm_state[prefill_state_indices] = last_recurrent_state.to(ssm_state.dtype)
 
