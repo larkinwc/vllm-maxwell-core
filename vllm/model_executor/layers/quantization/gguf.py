@@ -9,6 +9,8 @@ if TYPE_CHECKING:
     from vllm.model_executor.layers.quantization import QuantizationMethods
 
 import gguf
+import os
+
 import torch
 from gguf import GGMLQuantizationType as WeightType
 from torch.nn.parameter import Parameter, UninitializedParameter
@@ -69,7 +71,9 @@ class GGUFConfig(QuantizationConfig):
 
     @classmethod
     def get_min_capability(cls) -> int:
-        return 60
+        # GGUF dequant kernels are Triton-based and JIT-compile on Maxwell
+        # (sm_50). Lowered from 60 to enable GGUF on Tesla M10 (vllm-maxwell).
+        return 50
 
     @classmethod
     def get_config_filenames(cls) -> list[str]:
@@ -210,11 +214,26 @@ def _fused_mul_mat_gguf(
     # there is no need to call any kernel for fp16/bf16
     if qweight_type in UNQUANTIZED_TYPES:
         return x @ qweight.T
+    # Maxwell/sm_50 fix: the vendored quantized GGUF GEMM kernels
+    # `ggml_mul_mat_vec_a8` (MMVQ) and `ggml_mul_mat_a8` (MMQ) rely on the
+    # `__dp4a` int8 dot-product intrinsic, which requires compute capability
+    # >= 6.1. On Maxwell (sm_50/sm_52) `__dp4a` is emulated/undefined and the
+    # kernels silently emit NaN, corrupting the very first quantized matmul
+    # (e.g. Qwen3.5 GDN `in_proj_qkvz`) and producing pure-gibberish output.
+    # Force the dequantize + plain fp16 matmul path on these GPUs. It is
+    # numerically correct and the only viable option here.
+    # `MAXWELL_GGUF_DEQUANT` (0/1) can override the auto-detection.
+    _dq_env = os.environ.get("MAXWELL_GGUF_DEQUANT")
+    if _dq_env is not None:
+        _force_dequant = _dq_env == "1"
+    else:
+        _cap = torch.cuda.get_device_capability()
+        _force_dequant = _cap < (6, 1)
     # enable MMVQ in contiguous batching with batch_size=1
-    if x.shape[0] <= mmvq_safe and qweight_type in MMVQ_QUANT_TYPES:
+    if (not _force_dequant) and x.shape[0] <= mmvq_safe and qweight_type in MMVQ_QUANT_TYPES:
         y = ops.ggml_mul_mat_vec_a8(qweight, x, qweight_type, qweight.shape[0])
     # Use MMQ Kernel if it's available (standard + k-quants)
-    elif qweight_type in MMQ_QUANT_TYPES:
+    elif (not _force_dequant) and qweight_type in MMQ_QUANT_TYPES:
         y = ops.ggml_mul_mat_a8(qweight, x, qweight_type, qweight.shape[0])
     # If there is no available MMQ kernel, fallback to dequantize
     elif qweight_type in DEQUANT_TYPES:
