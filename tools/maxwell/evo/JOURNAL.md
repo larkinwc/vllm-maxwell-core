@@ -201,3 +201,12 @@ resting state for mixed-type fused tensors.
 - in-proj-q4km: plain-quant in_proj gibberish = Q4_K superblock misalignment
   in merged split (linear.py) — may be MOOT if E4 lands (dp4a fix could cover
   the in_proj path too; retest FIXED.gguf with sidecar once E4 is green).
+
+## Config limit (2026-07-06)
+
+- FIXED.gguf + mns=128 + MMQ policy: EngineCore dies in stable-ABI
+  `aten::empty` (allocation) during the b128 phase — quantized in_proj
+  rides MMQ at high concurrency where the F16 model used torch.mm. For
+  >64-seq serving on the all-quant model, drop gpu_memory_utilization or
+  cap mns at 64 (106.0 tok/s validated); F16INPROJ holds the 122.2 @128
+  record.
