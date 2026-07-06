@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Inference-only Qwen3Next model."""
 
+import os
 from collections.abc import Iterable
 from itertools import islice
 
@@ -282,6 +283,7 @@ class Qwen3NextAttention(nn.Module):
 
         self.q_norm = Qwen3NextRMSNorm(self.head_dim, eps=config.rms_norm_eps)
         self.k_norm = Qwen3NextRMSNorm(self.head_dim, eps=config.rms_norm_eps)
+        self.prefix = prefix
 
     def forward(
         self,
@@ -313,6 +315,29 @@ class Qwen3NextAttention(nn.Module):
         q, k = self.rotary_emb(positions, q, k)
 
         attn_output = self.attn(q, k, v)
+
+        if os.environ.get("MAXWELL_ATTN_DEBUG") and "3.self_attn" in str(getattr(self, "prefix", "")) and q.shape[0] <= 64:
+            import torch as _t
+            import torch.nn.functional as _F
+            with _t.no_grad():
+                T = q.shape[0]
+                hd = self.head_dim
+                qh = q.view(T, self.num_heads, hd).transpose(0, 1)            # (H,T,D)
+                kh = k.view(T, self.num_kv_heads, hd)
+                vh = v.view(T, self.num_kv_heads, hd)
+                rep = self.num_heads // self.num_kv_heads
+                kh = kh.repeat_interleave(rep, dim=1).transpose(0, 1)         # (H,T,D)
+                vh = vh.repeat_interleave(rep, dim=1).transpose(0, 1)
+                ref = _F.scaled_dot_product_attention(
+                    qh.unsqueeze(0).float(), kh.unsqueeze(0).float(),
+                    vh.unsqueeze(0).float(), is_causal=True, scale=self.scaling,
+                )  # (1,H,T,D)
+                ref = ref.squeeze(0).transpose(0, 1).reshape(T, self.num_heads * hd)
+                tri = attn_output.float()
+                d = (ref - tri).abs()
+                logger.warning("[ATTN_DBG] L3 T=%d triton_absmax=%.4g ref_absmax=%.4g max_abs_diff=%.4g mean_abs_diff=%.4g",
+                               T, tri.abs().max().item(), ref.abs().max().item(),
+                               d.max().item(), d.mean().item())
 
         if self.attn_output_gate:
             gate = torch.sigmoid(gate)
@@ -413,6 +438,12 @@ class Qwen3NextDecoderLayer(nn.Module):
         else:
             hidden_states, residual = self.input_layernorm(hidden_states, residual)
 
+        _dbg = os.environ.get("MAXWELL_NAN_DEBUG") and getattr(self, "layer_idx", -1) == 0
+        if _dbg:
+            import torch as _t
+            logger.warning("[GDN_DBG] L0 post-ln_in nan=%s absmax=%.4g",
+                           _t.isnan(hidden_states).any().item(),
+                           hidden_states.float().abs().max().item())
         self_attention_output = torch.empty_like(hidden_states)
         if self.layer_type == "linear_attention":
             self.linear_attn(
@@ -428,6 +459,12 @@ class Qwen3NextDecoderLayer(nn.Module):
         else:
             raise ValueError("Invalid layer_type")
         hidden_states = self_attention_output
+        if _dbg:
+            import torch as _t
+            logger.warning("[GDN_DBG] L0 attn_out(%s) nan=%s absmax=%.4g",
+                           self.layer_type,
+                           _t.isnan(hidden_states).any().item(),
+                           hidden_states.float().abs().max().item())
 
         if self.layer_scale:
             if len(hidden_states.shape) == 2:
@@ -530,6 +567,16 @@ class Qwen3NextModel(nn.Module, EagleModelMixin):
                 hidden_states=hidden_states,
                 residual=residual,
             )
+            if os.environ.get("MAXWELL_NAN_DEBUG"):
+                import torch as _t
+                _hn = _t.isnan(hidden_states).any().item() or _t.isinf(hidden_states).any().item()
+                _rn = (residual is not None) and (_t.isnan(residual).any().item() or _t.isinf(residual).any().item())
+                _lt = getattr(layer, "layer_type", "?")
+                logger.warning(
+                    "[NAN_DEBUG] layer=%s type=%s h_nan/inf=%s r_nan/inf=%s h_absmax=%.4g",
+                    layer_idx, _lt, _hn, _rn,
+                    hidden_states.float().abs().max().item(),
+                )
             self._maybe_add_hidden_state(
                 aux_hidden_states, layer_idx + 1, hidden_states, residual
             )
