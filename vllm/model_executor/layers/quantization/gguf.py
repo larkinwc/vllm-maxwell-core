@@ -576,7 +576,12 @@ class GGUFLinearMethod(LinearMethodBase):
 
         if shard_id:
             # dequantize shard weights respectively
-            shard_id = ["q", "k", "v"] if "q" in shard_id else shard_id
+            # shard_id records LOAD order (GGUF file order); the concat below
+            # must follow the logical output layout. String ids are forced to
+            # q,k,v; integer ids (e.g. Qwen3.5 in_proj_qkvz, where attn_gate
+            # precedes attn_qkv on disk -> [3,0,1,2]) need the same
+            # canonicalization or the fused output comes out permuted.
+            shard_id = ["q", "k", "v"] if "q" in shard_id else sorted(shard_id)
             qweight = layer.qweight
             result = []
             for idx in shard_id:
