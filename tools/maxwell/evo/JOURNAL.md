@@ -25,17 +25,27 @@ harness, 2026-07-05); evo-harness baseline below is the comparison anchor.
 
 | E4 | evo-mmvq (mmvq-fix) | MAXWELL_EVO_MMVQ=1 (hybrid) | 18.6 | **16.7** | 149s | ✓ | **WINNER, single-stream 3.8×** (4.4→16.7). Fixed MMVQ is correct AND fast; batch8 unchanged by design (dequant above mmvq_safe). Gap to E2's 32.8 upper bound = room for MMQ policy / SoA / tuning |
 
+| E5 | evo-mmvq+mmq (mmvq-fix) | +MAXWELL_EVO_POLICY=mmvq+mmq | 18.5 | 16.7 | 148s | ✓ | MMQ tiles = dequant+cuBLAS exactly on batch-8 (null). Step arithmetic: batch-8 = 138 ms fixed floor (from E2) + ~293 ms weight path either route; single-stream 60 ms/step ≈ 80% of roofline given the ~30 ms floor |
+
+## Step-time model (from E1/E2/E4/E5)
+
+- batch-8 step ≈ 431 ms = 138 ms non-matmul floor (attention+GDN+allreduce+
+  launches, measured by E2's empty kernels) + ~293 ms weight path (same for
+  MMQ and dequant+cuBLAS).
+- single step ≈ 60 ms = ~30 ms floor + ~30 ms MMVQ (1.57 GB/die @ 73 GB/s =
+  21.5 ms theoretical → MMVQ ~72% BW efficiency, SoA's target).
+- Implication: MMVQ weight re-read scales ×batch (8×21.5 ≈ 172 ms < 293 ms)
+  → E6 MMVQ_MAX=8 hypothesis ≈ 26 tok/s batch-8. Perfect weight path caps
+  batch-8 at ~37 tok/s (138 ms floor) — the floor itself is the other half
+  of the problem (profile: E9).
+
 ## In flight
 
-- E3 knee: BENCH_MAX_SEQS=32, batches 1/8/16/32 (Tier 0.7). Caveat: sidecar
-  nvcc build shares the box CPU during its load phase — if batch-8 cell
-  deviates from E1, rerun clean.
-- E4 evo-mmvq: sidecar ext with sm_50 dp4a fallback + widened guards
-  (commit 8b641bd0f), hybrid policy (fused matvec ≤mmvq_safe, dequant above).
-  Numerics gate `test_sidecar.py` must PASS before benching. Expect single
-  ≥20, batch8 ≈ E1.
-- E5 evo-mmvq+mmq: MAXWELL_EVO_POLICY=mmvq+mmq — batch-8 decode through
-  software-dp4a MMQ tiles. Expect batch8 anywhere in 15–45; measure.
+- E6 mmvq8: MAXWELL_EVO_MMVQ_MAX=8 — MMVQ for all decode sizes. Expect ~26.
+- E7 knee-mmq: mmvq+mmq, mns=32, batches 8/16/32 — does MMQ beat dequant at
+  16/32 aggregate? (dequant knee: 33.6/63.6).
+- E8 tp16-mmvq: champion config at TP=16 (weights/die 390 MB → 5.3 ms read;
+  dequant TP=16 was 23.5 batch / 3.9 single).
 
 ## Backlog (families)
 
