@@ -6,6 +6,21 @@ Fitness: `batch_throughput_tok_s` at TP=4 + CUDA graphs (evo harness
 from `docs/ROADMAP.md` + `research/AGENTS.maxwell.md`; negative results there
 are not re-run.
 
+## Scoreboard (2026-07-06, all coherent)
+
+| metric | session start | current champion | Δ | config |
+|---|---|---|---|---|
+| batch-8 tok/s (fitness) | 18.5 | **34.3** | **+85%** | E20: TP4-CG, MAXWELL_EVO_MMVQ=1 MMVQ_MAX=8 Q4K_MSUM=1 **V2=1** |
+| single-stream tok/s | 4.4 | **17.3** | **3.9×** | same |
+| batch-16 | — | 39.0 | — | +MMVQ_MAX=16 (v2 ≤16) |
+| batch-32 | 63.6 | 66.3 | +4% | MMQ above 16 |
+| one-engine aggregate | — | **122.2** @ b128 | — | mns=128; knee ≈64–96 |
+
+Root causes fixed: (1) vecdotq impl bodies compiled EMPTY below cc 6.1;
+(2) merged-GGUF shards concatenated in file order (upstream vLLM bug, also
+fixed the 2-generation-old in_proj gibberish). Kernel v2 (mmvq_v2.cuh) adds
+ncols_dst weight reuse + q8 row reuse.
+
 Config shorthand: TP4-CG unless noted. Historical baseline 18.5/4.4 (stock
 harness, 2026-07-05); evo-harness baseline below is the comparison anchor.
 
@@ -106,6 +121,9 @@ never rsync the sidecar while engines are queued.
 
 | E20 | v2 engine (kernel) | champion env + MAXWELL_EVO_V2=1 | **34.3** | 17.3 | 148s | ✓ | **CHAMPION +41%** (24.3→34.3; +85% vs session-start 18.5). Step 233 ms ≈ 138 floor + 95 weights — model exact; floor now dominates batch-8 |
 | E21 | v2 knee | +MMVQ_MAX=16, mns=32 | 33.8 | 17.3 | 150s | ✓ | b16 39.0 (v2, beats MMQ 35.2 +11%); b32 66.3 (MMQ, unchanged). Dispatch v1@1 / v2@2–16 / MMQ@>16 validated |
+
+| E23 | q4km-v2 (model) | FIXED.gguf + champion env | 34.2 | 16.4 | 164s | ✓ | all-quant TIES batch-8, loses single (in_proj q6_K rides v1 at b1 = 33 GB/s vs F16 GEMV 67). F16INPROJ stays perf champion; FIXED.gguf = capacity option (+1.5 GB VRAM) with correctness now proven |
+| E24 | rpb2 (kernel-tune) | +V2_RPB=2 | 33.0 | 17.2 | 156s | ✓ | slight net loss. Microbench: q4_K b8 59.5→48.4 (worse), q6_K b8 66.5→90.1 eff (better), b1 both better (42.0/38.3). Per-type RPB mix → backlog |
 
 ## Next tier (post-v2 priorities)
 

@@ -30,13 +30,14 @@ def summarize(trace_dir):
     if not files:
         print("NO_TRACE_FILES", trace_dir)
         return
-    path = files[0]
+    path = next((f for f in files if "trace.json" in f), files[0])
     opener = gzip.open if path.endswith(".gz") else open
     with opener(path, "rt") as f:
         data = json.load(f)
+    events = data if isinstance(data, list) else data.get("traceEvents", [])
     by_kernel = defaultdict(float)
     total = 0.0
-    for ev in data.get("traceEvents", []):
+    for ev in events:
         if ev.get("ph") == "X" and ev.get("cat") in ("kernel", "gpu_memcpy"):
             dur = ev.get("dur", 0.0)
             by_kernel[ev.get("name", "?")[:110]] += dur
@@ -47,6 +48,9 @@ def summarize(trace_dir):
 
 
 def main():
+    if sys.argv[1] == "--parse-only":
+        summarize(sys.argv[2])
+        return
     trace_dir = sys.argv[1]
     os.makedirs(trace_dir, exist_ok=True)
     tp = int(os.environ.get("BENCH_TP", "4"))
