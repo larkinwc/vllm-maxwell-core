@@ -226,25 +226,32 @@ at::Tensor mul_mat_a8(at::Tensor W, at::Tensor X, int64_t type, int64_t row) {
 
 // ---- v2: ncols_dst weight reuse + rows_per_block q8 reuse (q4_K/q6_K) ----
 
-template <int NC, int RPB>
+template <int NC>
 static void launch_v2(const void* w, const void* qx, void* y, int type,
                       int cols, int rows, int pad_bytes, int nvecs, int j0,
                       int q8_row_bytes, int y_row_halfs, cudaStream_t stream) {
-  const dim3 grid((rows + RPB - 1) / RPB, 1, 1);
-  const dim3 block(32, 1, 1);
   const void* qx_off = (const char*)qx + (size_t)j0 * q8_row_bytes;
   void* y_off = (char*)y + (size_t)j0 * y_row_halfs * 2;
+  const dim3 block(32, 1, 1);
   if (type == 12) {
+    constexpr int RPB = MAXWELL_V2_RPB_Q4K;
+    const dim3 grid((rows + RPB - 1) / RPB, 1, 1);
     mul_mat_vec_q4_K_v2<NC, RPB><<<grid, block, 0, stream>>>(
         w, qx_off, y_off, cols, rows, pad_bytes, nvecs);
   } else {
+    constexpr int RPB = MAXWELL_V2_RPB_Q6K;
+    const dim3 grid((rows + RPB - 1) / RPB, 1, 1);
     mul_mat_vec_q6_K_v2<NC, RPB><<<grid, block, 0, stream>>>(
         w, qx_off, y_off, cols, rows, pad_bytes, nvecs);
   }
 }
 
-#ifndef MAXWELL_V2_RPB
-#define MAXWELL_V2_RPB 1
+// rows_per_block by quant type (microbench: q4_K best at 1, q6_K at 2)
+#ifndef MAXWELL_V2_RPB_Q4K
+#define MAXWELL_V2_RPB_Q4K 1
+#endif
+#ifndef MAXWELL_V2_RPB_Q6K
+#define MAXWELL_V2_RPB_Q6K 2
 #endif
 
 at::Tensor mul_mat_vec_a8_v2(at::Tensor W, at::Tensor X, int64_t type,
@@ -265,27 +272,26 @@ at::Tensor mul_mat_vec_a8_v2(at::Tensor W, at::Tensor X, int64_t type,
   quantize_row_q8_1_cuda<scalar_t>((scalar_t*)X.data_ptr(),
                                    (void*)quant_X.data_ptr(), col, vecs,
                                    stream);
-  constexpr int RPB = MAXWELL_V2_RPB;
   int j = 0;
   while (j < vecs) {
     const int left = vecs - j;
     if (left >= 8) {
-      launch_v2<8, RPB>((void*)W.data_ptr(), (void*)quant_X.data_ptr(),
+      launch_v2<8>((void*)W.data_ptr(), (void*)quant_X.data_ptr(),
                         (void*)Y.data_ptr(), type, col, row, pad_bytes, vecs,
                         j, pad_bytes, row, stream);
       j += 8;
     } else if (left >= 4) {
-      launch_v2<4, RPB>((void*)W.data_ptr(), (void*)quant_X.data_ptr(),
+      launch_v2<4>((void*)W.data_ptr(), (void*)quant_X.data_ptr(),
                         (void*)Y.data_ptr(), type, col, row, pad_bytes, vecs,
                         j, pad_bytes, row, stream);
       j += 4;
     } else if (left >= 2) {
-      launch_v2<2, RPB>((void*)W.data_ptr(), (void*)quant_X.data_ptr(),
+      launch_v2<2>((void*)W.data_ptr(), (void*)quant_X.data_ptr(),
                         (void*)Y.data_ptr(), type, col, row, pad_bytes, vecs,
                         j, pad_bytes, row, stream);
       j += 2;
     } else {
-      launch_v2<1, RPB>((void*)W.data_ptr(), (void*)quant_X.data_ptr(),
+      launch_v2<1>((void*)W.data_ptr(), (void*)quant_X.data_ptr(),
                         (void*)Y.data_ptr(), type, col, row, pad_bytes, vecs,
                         j, pad_bytes, row, stream);
       j += 1;
