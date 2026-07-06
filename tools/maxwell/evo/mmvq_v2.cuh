@@ -7,9 +7,8 @@
 //     (kills the q8 re-read the NO_U probe measured at ~24%).
 // q4_K and q6_K only (the two K-quant types in Qwen3.5 Q4_K_M).
 #pragma once
-
-#include "ggml-common.h"
-#include "vecdotq.cuh"
+// NOTE: include after ggml-common.h and vecdotq.cuh (no include guards
+// there) — mmvq_sidecar.cu already pulls them in.
 
 template <int ncols_dst, int rows_per_block>
 static __global__ void mul_mat_vec_q4_K_v2(

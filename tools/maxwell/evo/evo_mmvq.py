@@ -55,7 +55,9 @@ def try_fused(x, qweight, qweight_type, mmvq_safe):
     if qweight_type not in FUSED_TYPES:
         return None
     if x.shape[0] <= (_MMVQ_MAX if _MMVQ_MAX > 0 else mmvq_safe):
-        if _USE_V2 and qweight_type in _V2_TYPES:
+        # v2 amortizes weight reads across <=8 output columns — a wash at
+        # batch 1 (keep v1 there), decisive from batch 2 up.
+        if _USE_V2 and x.shape[0] >= 2 and qweight_type in _V2_TYPES:
             return _ext.mul_mat_vec_a8_v2(qweight, x, qweight_type,
                                           qweight.shape[0])
         return _ext.mul_mat_vec_a8(qweight, x, qweight_type, qweight.shape[0])
