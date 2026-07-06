@@ -23,6 +23,8 @@ harness, 2026-07-05); evo-harness baseline below is the comparison anchor.
   batches 1/2/8, max_rel ≤ 0.012 (q8_1 activation quant noise). The dp4a
   fallback + widened guards produce correct kernels on sm_50.
 
+| E4 | evo-mmvq (mmvq-fix) | MAXWELL_EVO_MMVQ=1 (hybrid) | 18.6 | **16.7** | 149s | ✓ | **WINNER, single-stream 3.8×** (4.4→16.7). Fixed MMVQ is correct AND fast; batch8 unchanged by design (dequant above mmvq_safe). Gap to E2's 32.8 upper bound = room for MMQ policy / SoA / tuning |
+
 ## In flight
 
 - E3 knee: BENCH_MAX_SEQS=32, batches 1/8/16/32 (Tier 0.7). Caveat: sidecar
