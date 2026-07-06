@@ -79,11 +79,19 @@ cat. Both models should gain.
 | E16b | f16+fastpath (control) | champion cfg | 23.5 | 16.9 | 153s | ✓ | champion held; fast path harmless. Keep it (correctness + cleanliness), keep F16INPROJ as perf champion |
 | E17 | mns128 (scheduling) | mns=128, b 64/96/128 | — | 16.8 | 159s | ✓ | **knee found ≈64–96**: 110.3 / 101.5 (pad-to-128 artifact) / **122.2 @128** — one-engine peak. Serving sweet spot mns=64 (1.7 tok/s/user) or 128 (+11% aggregate at 0.95/user) |
 
-## In flight
+## Kernel micro-iteration (E18+, microbench on idle die, ~3 min/cycle)
 
-- E18 bw-microbench: sidecar MMVQ GB/s per quant type/shape vs 73 GB/s
-  ceiling + F16 GEMV reference (in_proj anomaly: F16 GEMV beat Q4_K MMVQ).
-  Decides kernel-tuning upside for batch-8 (8× re-read) and single.
+| variant | q4_K GB/s (b1) | verdict |
+|---|---|---|
+| E18 baseline | 36.5 (q6_K 33.8, lm_head 33.3; F16 GEMV ref 67.2 = 92% ceiling) | MMVQ at ~45% ceiling, FLAT across type/shape/batch → not latency-bound. F16-vs-Q4_K in_proj anomaly explained |
+| V1 dp4a short-mul | 36.0 | NULL — nvcc already lowers int8 products well |
+| V-msum (q4_K dot2 hoist via q8 ds.y) | **38.8** | **+6%, numerics PASS, kept** (MAXWELL_EVO_Q4K_MSUM=1). Small gain from halving dp4a ⇒ ALU is not the main wall |
+| NO_U (bench-only, q8 loads killed) | pending | discriminator: q8 activation re-read is ~2× weight traffic per row (L2-served); if GB/s jumps → restructure for q8 reuse (rows-per-block staging, llama.cpp master mmvq shape) |
+
+Traffic model: per 144 B q4_K superblock each row re-reads ~72 B of q8
+data + ds; at b1 the q8 row (4.6 KB) is re-read by every one of 12288/2
+warp-iterations → q8 L2 traffic ≈ 2× weight DRAM traffic. L2 round-trip
+may be the ~34 GB/s cap.
 
 ## Backlog (families)
 

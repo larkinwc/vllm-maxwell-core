@@ -60,8 +60,14 @@ def main():
             ref = (x @ wdq.T).float()
             got_v = evo_mmvq._ext.mul_mat_vec_a8(w, x, qtype, rows).float()
             got_m = evo_mmvq._ext.mul_mat_a8(w, x, qtype, rows).float()
+            checks = [("mmvq", got_v), ("mmq", got_m)]
+            if qtype in (12, 14) and hasattr(evo_mmvq._ext, "mul_mat_vec_a8_v2"):
+                checks.append(
+                    ("mmvq_v2",
+                     evo_mmvq._ext.mul_mat_vec_a8_v2(w, x, qtype, rows).float())
+                )
             scale = ref.abs().max().clamp(min=RTOL_DENOM)
-            for name, got in (("mmvq", got_v), ("mmq", got_m)):
+            for name, got in checks:
                 rel = ((got - ref).abs().max() / scale).item()
                 ok = rel <= MAX_REL and torch.isfinite(got).all().item()
                 print(f"{t.name} type={qtype} batch={batch} {name}: "

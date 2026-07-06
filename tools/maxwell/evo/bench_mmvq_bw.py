@@ -34,19 +34,24 @@ PICKS = [
 def bench_one(w, qtype, rows, cols, label):
     x1 = torch.randn(1, cols, dtype=torch.float16, device="cuda") * 0.5
     x8 = torch.randn(8, cols, dtype=torch.float16, device="cuda") * 0.5
-    for x, tag in ((x1, "b1"), (x8, "b8")):
-        for _ in range(5):
-            evo_mmvq._ext.mul_mat_vec_a8(w, x, qtype, rows)
-        torch.cuda.synchronize()
-        t0 = time.time()
-        for _ in range(REPS):
-            evo_mmvq._ext.mul_mat_vec_a8(w, x, qtype, rows)
-        torch.cuda.synchronize()
-        dt = (time.time() - t0) / REPS
-        # MMVQ re-reads the full quantized weight per vec (per batch row)
-        gb = w.numel() * x.shape[0] / 1e9
-        print(f"MMVQ {label} type={qtype} [{rows}x{cols}] {tag}: "
-              f"{dt * 1e3:7.3f} ms  {gb / dt:6.1f} GB/s")
+    kernels = [("MMVQ", evo_mmvq._ext.mul_mat_vec_a8)]
+    if qtype in (12, 14) and hasattr(evo_mmvq._ext, "mul_mat_vec_a8_v2"):
+        kernels.append(("MMV2", evo_mmvq._ext.mul_mat_vec_a8_v2))
+    for kname, kfn in kernels:
+        for x, tag in ((x1, "b1"), (x8, "b8")):
+            for _ in range(5):
+                kfn(w, x, qtype, rows)
+            torch.cuda.synchronize()
+            t0 = time.time()
+            for _ in range(REPS):
+                kfn(w, x, qtype, rows)
+            torch.cuda.synchronize()
+            dt = (time.time() - t0) / REPS
+            # v1 re-reads the weight per vec; v2 reads it once per <=8 vecs.
+            # report effective GB/s in v1 terms so numbers stay comparable.
+            gb = w.numel() * x.shape[0] / 1e9
+            print(f"{kname} {label} type={qtype} [{rows}x{cols}] {tag}: "
+                  f"{dt * 1e3:7.3f} ms  {gb / dt:6.1f} GB/s(eff)")
 
 
 def bench_f16(rows, cols, label):

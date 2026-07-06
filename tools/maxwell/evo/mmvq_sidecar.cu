@@ -15,6 +15,7 @@
 #include "vecdotq.cuh"
 #include "mmvq.cuh"
 #include "mmq.cuh"
+#include "mmvq_v2.cuh"
 
 // quantize_row_q8_1 copied from gguf_kernel.cu (it is not header-exposed).
 template <typename scalar_t>
@@ -223,7 +224,79 @@ at::Tensor mul_mat_a8(at::Tensor W, at::Tensor X, int64_t type, int64_t row) {
   return Y;
 }
 
+// ---- v2: ncols_dst weight reuse + rows_per_block q8 reuse (q4_K/q6_K) ----
+
+template <int NC, int RPB>
+static void launch_v2(const void* w, const void* qx, void* y, int type,
+                      int cols, int rows, int pad_bytes, int nvecs, int j0,
+                      int q8_row_bytes, int y_row_halfs, cudaStream_t stream) {
+  const dim3 grid((rows + RPB - 1) / RPB, 1, 1);
+  const dim3 block(32, 1, 1);
+  const void* qx_off = (const char*)qx + (size_t)j0 * q8_row_bytes;
+  void* y_off = (char*)y + (size_t)j0 * y_row_halfs * 2;
+  if (type == 12) {
+    mul_mat_vec_q4_K_v2<NC, RPB><<<grid, block, 0, stream>>>(
+        w, qx_off, y_off, cols, rows, pad_bytes, nvecs);
+  } else {
+    mul_mat_vec_q6_K_v2<NC, RPB><<<grid, block, 0, stream>>>(
+        w, qx_off, y_off, cols, rows, pad_bytes, nvecs);
+  }
+}
+
+#ifndef MAXWELL_V2_RPB
+#define MAXWELL_V2_RPB 1
+#endif
+
+at::Tensor mul_mat_vec_a8_v2(at::Tensor W, at::Tensor X, int64_t type,
+                             int64_t row) {
+  TORCH_CHECK(type == 12 || type == 14,
+              "v2 kernel supports q4_K(12)/q6_K(14) only, got ", type);
+  TORCH_CHECK(X.scalar_type() == at::kHalf, "v2 expects fp16 activations");
+  const int col = X.size(1);
+  const int vecs = X.size(0);
+  const int padded = (col + 512 - 1) / 512 * 512;
+  const int pad_bytes = padded / 32 * 36;  // q8_1 row stride in bytes
+  const at::cuda::CUDAGuard device_guard(X.device());
+  auto Y = at::empty({vecs, row}, X.options());
+  cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+  auto quant_X =
+      at::empty({vecs, padded / 32 * 9}, X.options().dtype(at::kInt));
+  using scalar_t = c10::Half;
+  quantize_row_q8_1_cuda<scalar_t>((scalar_t*)X.data_ptr(),
+                                   (void*)quant_X.data_ptr(), col, vecs,
+                                   stream);
+  constexpr int RPB = MAXWELL_V2_RPB;
+  int j = 0;
+  while (j < vecs) {
+    const int left = vecs - j;
+    if (left >= 8) {
+      launch_v2<8, RPB>((void*)W.data_ptr(), (void*)quant_X.data_ptr(),
+                        (void*)Y.data_ptr(), type, col, row, pad_bytes, vecs,
+                        j, pad_bytes, row, stream);
+      j += 8;
+    } else if (left >= 4) {
+      launch_v2<4, RPB>((void*)W.data_ptr(), (void*)quant_X.data_ptr(),
+                        (void*)Y.data_ptr(), type, col, row, pad_bytes, vecs,
+                        j, pad_bytes, row, stream);
+      j += 4;
+    } else if (left >= 2) {
+      launch_v2<2, RPB>((void*)W.data_ptr(), (void*)quant_X.data_ptr(),
+                        (void*)Y.data_ptr(), type, col, row, pad_bytes, vecs,
+                        j, pad_bytes, row, stream);
+      j += 2;
+    } else {
+      launch_v2<1, RPB>((void*)W.data_ptr(), (void*)quant_X.data_ptr(),
+                        (void*)Y.data_ptr(), type, col, row, pad_bytes, vecs,
+                        j, pad_bytes, row, stream);
+      j += 1;
+    }
+  }
+  return Y;
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+  m.def("mul_mat_vec_a8_v2", &mul_mat_vec_a8_v2,
+        "v2 fused GGUF matvec: ncols_dst weight reuse + q8 row reuse");
   m.def("mul_mat_vec_a8", &mul_mat_vec_a8,
         "fused GGUF quantized matvec (MMVQ, sm_50-safe dp4a)");
   m.def("mul_mat_a8", &mul_mat_a8,
