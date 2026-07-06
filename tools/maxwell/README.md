@@ -32,9 +32,11 @@ invert. `fix_gguf.py` inverts all three:
    `A_log`/`dt_bias`, `conv1d` (V channels), and `out_proj` (input columns).
 
 `--f16-inproj` additionally dequantizes `in_proj_qkv`/`in_proj_z` to F16 as a
-fallback around a vLLM merged-GGUF quantized-loader path; with the sm_50
-`__dp4a` dequant fix (below) the plain quantized variant is expected to work
-too.
+fallback around a vLLM merged-GGUF quantized-loader path. **Still required**
+(retested 2026-07-05): the plain-quantized variant (`Qwen3.5-9B-FIXED.gguf`,
+no `--f16-inproj`) runs at full speed but emits gibberish even with the sm_50
+`__dp4a` dequant fix — the merged quantized `in_proj_qkvz` split is broken
+independently of dp4a (suspect Q4_K superblock misalignment in the split).
 
 ## sm_50 code fixes (in the vLLM tree, not here)
 
@@ -58,14 +60,32 @@ These live in the vLLM source and are required for correctness/perf on Maxwell:
 
 ## TP scaling results (Qwen3.5-9B, 8 prompts x 128 decode tok, greedy)
 
-| TP | dies | eager tok/s | **cudagraph tok/s** |
-|----|------|-------------|---------------------|
-| 2  | 2    | 8.3         | 10.3                |
-| 4  | 4    | 12.1        | **18.5** (best)     |
-| 8  | 8    | 10.7        | 14.2                |
-| 16 | 16   | 6.0         | (not run)           |
+2026-07-05 SSD retest (root moved USB-stick → Intel DC SSD; decode throughput
+**unchanged** — storage was never the bottleneck; eager cells kept from the
+original session):
 
-Throughput peaks at **TP=4 + CUDA graphs (18.5 tok/s)**. On M10s (no NVLink, no
-tensor cores) per-op launch overhead dominates decode, so CUDA graphs help a
-lot; spreading the model past 4 dies adds all-reduce overhead that outweighs the
-compute split.
+| TP | dies | eager tok/s* | **cudagraph tok/s** | cg single-stream | cg load |
+|----|------|--------------|---------------------|------------------|---------|
+| 2  | 2    | 8.3          | 10.3                | —                | —       |
+| 4  | 4    | 12.1         | **18.5** (best/die) | 4.4              | 149 s   |
+| 8  | 8    | 10.7         | 14.5                | 2.2              | 1366 s  |
+| 16 | 16   | 6.0          | **23.5** (new best) | 3.9              | 869 s   |
+
+\* eager from the pre-SSD session; retest control/treatment reproduced (TP=4-CG
+18.5→18.5, TP=8-CG 14.2→14.5) so the rest were not re-run. Never deploy eager.
+
+Extra probes (2026-07-05, TP=4 + graphs):
+- **Placement is a non-lever**: spread `CUDA_VISIBLE_DEVICES=0,4,8,12` (one die
+  per board) ≈ packed `0,1,2,3` — 18.6 vs 18.5 batch, 4.5 vs 4.4 single-stream.
+- **Plain-quant in_proj still broken**: `BENCH_MODEL=…/Qwen3.5-9B-FIXED.gguf`
+  runs at 17.8 tok/s but emits gibberish (see `fix_gguf.py` section above).
+
+**TP=16 + CUDA graphs is the new batch-8 champion (23.5 tok/s)** — a cell never
+run before this retest; its eager 6.0 had written it off (eager numbers are
+launch-overhead artifacts, never draw TP conclusions from them). Scaling is
+non-monotonic — **TP=8 is a valley** (18.5 → 14.5 → 23.5), unexplained, profile
+before trusting any scaling story. Per-die efficiency still favors TP=4
+(4.6 vs 1.5 tok/s/die), so aggregate serving should still prefer 4× TP=4
+data-parallel replicas over one TP=16 engine; and TP≥8 pays a long CPU-side
+GGUF load (23 min at TP=8, 14.5 min at TP=16). For the forward optimization
+plan see the superproject's `docs/ROADMAP.md`.
