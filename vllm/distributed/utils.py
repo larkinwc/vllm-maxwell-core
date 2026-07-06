@@ -598,6 +598,12 @@ def stateless_init_torch_distributed_process_group(
         gloo_timeout = get_cpu_distributed_timeout_or_none()
         if gloo_timeout is not None:
             timeout = gloo_timeout
+    # Allow overriding the rendezvous/init timeout for slow multi-GPU startup
+    # (e.g. TP>=8 on Maxwell M10s where per-worker CUDA/Triton init is slow and
+    # the default 600s rendezvous window is exceeded).
+    _env_timeout = os.environ.get("VLLM_DIST_INIT_TIMEOUT_S")
+    if _env_timeout:
+        timeout = timedelta(seconds=int(_env_timeout))
 
     if listen_socket is not None:
         store = create_tcp_store(
