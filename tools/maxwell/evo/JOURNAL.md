@@ -157,9 +157,22 @@ resting state for mixed-type fused tensors.
 1. **GDN decode block fusion (E31 family, biggest remaining single item):**
    eager b8 shows qwen_gdn_attention_core ≈ 2.5 ms CUDA-total per call × 24
    layers — conv1d update + gating einsums + Triton recurrence + norm as
-   separate kernels. A fused CUDA GDN-decode kernel (llama.cpp
-   gated_delta_net.cu as reference for the recurrence) could take ~10-15%
-   off the b8 step. Substantial port (~300+ lines).
+   separate kernels. A fused CUDA GDN-decode kernel could take ~10-15% off
+   the b8 step. Execution plan (recon done 2026-07-06):
+   - Reference: llama.cpp master `ggml/src/ggml-cuda/gated_delta_net.cu`
+     (327 lines, fetched; template<S_v, KDA, keep_rs_t>, warp_size×4
+     threads, pure fp32, no arch gates).
+   - Port target: the semantics of
+     `fused_recurrent_gated_delta_rule_packed_decode` (fla/ops/
+     fused_recurrent.py:339) — packed post-conv mixed_qkv, a/b +
+     A_log/dt_bias softplus gating, in-kernel q/k L2 norm, paged
+     ssm_state_indices, fp32 state, one token/step. Optionally fold
+     `causal_conv1d_update` in (immediately precedes, same tensors).
+   - Integration: sidecar #2 (`gdn_sidecar.cu`, no gguf headers) + env hook
+     MAXWELL_EVO_GDN=1 in fused_recurrent.py (same pattern as gguf hook).
+   - Gate: direct A/B vs the Triton kernel on GPU15 with synthetic tensors
+     (Triton decode kernel RUNS on sm_50 — usable as the reference), then
+     coherence + engine bench.
 2. MMQ modernization for b>16 (llama.cpp master mmq shape) — lifts the
    64/128-batch aggregate; moderate.
 3. Comms (~6-9%): knobs measured dead; compressed allreduce only remaining
