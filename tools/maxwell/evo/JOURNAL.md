@@ -44,10 +44,31 @@ harness, 2026-07-05); evo-harness baseline below is the comparison anchor.
 | E8 | tp16-mmvq (validation) | TP=16, hybrid | 23.7 | 10.8 | 772s | ✓ | single 3.9→10.8 (+177%) but < TP=4's 16.8 — TP=16 fixed floor dominates. batch-8 23.7 unchanged (dispatch above mmvq_safe). TP=4 is the platform |
 | E9 | profile (Tier 0.1) | eager traces b1/b8 | — | — | — | — | b1: host-staged allreduce ≈75% of GPU time (record_param_comms 1.5 ms/call × 52/token ≈ the 30 ms single floor) — comms already known dead end ⇒ single-stream ≈ ceiling. b8 (dequant): mm 27% + dequantize 15% + copies ~35% ⇒ weight path, as modeled |
 
+| E10 | crossover (dispatch) | MMVQ_MAX=12+mmq, mns=32, b 8/12/16/32 | 23.7 | 16.7 | 148s | ✓ | champion holds under mns=32 graphs: 23.7/64.4. batch-12 cell (24.4) pads to the 16-graph — not comparable. Dispatch settled: MMVQ ≤8, MMQ/dequant above |
+
+## Root cause #2 (found by reading, 2026-07-06): merged-shard concat order
+
+`GGUFLinearMethod.apply()` concatenates fused-layer shard outputs in LOAD
+order (`shard_id` append order = GGUF file order). Qwen3.5 stores
+`attn_gate` (z, shard 3) before `attn_qkv` (shards 0,1,2) → in_proj_qkvz
+output is `[z|q|k|v]` where the model splits `[q|k|v|z]` → the plain-quant
+in_proj "gibberish" (structured garbage `",akai方-的…"`, exactly what a
+column permutation produces). String ids were already canonicalized
+(`["q","k","v"]`); integer ids never got sorted. F16INPROJ dodges it because
+all-F16 layers route to `UnquantizedLinearMethod` (direct writes, no concat)
+— which is why the F16 rewrite "fixed" it. Fix: `sorted(shard_id)`.
+**Upstream vLLM bug, PR-worthy.** Prize if E14 confirms: drop the F16
+in_proj rewrite (31% of model bytes → ~5%), ≈ +9% on every config, +2.25 GiB
+back, and the whole fix_gguf pipeline simplifies to default mode.
+
 ## In flight
 
-- E10 crossover: MMVQ_MAX=12 + mmq policy, mns=32, b 8/12/16/32 — dispatch
-  curve + champion validation under mns=32 graphs. Model: MMVQ wins ≤~13.
+- E11 mmvy2: GGML_CUDA_MMV_Y=2 on champion (tyangpu1 prior: +2%).
+- E13 mns64: aggregate ceiling, b 32/48/64 (E3 said no knee at 32).
+- E14 q4km-sorted: FIXED.gguf + sorted-shard fix + fused MMVQ. Predict
+  coherent at ~26 batch-8 / ~18 single (per-die weight bytes 1.95→1.57 GB).
+- E15 f16-control: champion config under sorted() — regression gate
+  (expected no-op; F16 path doesn't touch the sorted code).
 
 ## Backlog (families)
 
