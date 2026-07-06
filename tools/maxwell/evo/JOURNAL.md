@@ -125,13 +125,22 @@ never rsync the sidecar while engines are queued.
 | E23 | q4km-v2 (model) | FIXED.gguf + champion env | 34.2 | 16.4 | 164s | ✓ | all-quant TIES batch-8, loses single (in_proj q6_K rides v1 at b1 = 33 GB/s vs F16 GEMV 67). F16INPROJ stays perf champion; FIXED.gguf = capacity option (+1.5 GB VRAM) with correctness now proven |
 | E24 | rpb2 (kernel-tune) | +V2_RPB=2 | 33.0 | 17.2 | 156s | ✓ | slight net loss. Microbench: q4_K b8 59.5→48.4 (worse), q6_K b8 66.5→90.1 eff (better), b1 both better (42.0/38.3). Per-type RPB mix → backlog |
 
-## Next tier (post-v2 priorities)
+## E22 floor decomposition (eager v2 profiles; graph-mode traces export no
+## kernel events — CUPTI graph-replay records dropped by torch's exporter)
 
-1. Floor attack (138 ms at b8): graph-mode profile of champion step to split
-   allreduce / GDN Triton decode / paged attention / q8 quantize. (E22)
-2. RPB=2 microbench — v2 rows_per_block for b1 q8 reuse (single 17.3 → ?).
-3. All-quant retest under v2 (E23): FIXED.gguf byte savings now that the
-   fused path runs at 60+ GB/s (E16's loss was at 33 GB/s kernels).
+Batch-8 self-CUDA shares (ratios; eager inflates absolute):
+`_fused_mul_mat_gguf` 39.8% · **`aten::mm` 17.0% (F16 in_proj via cuBLAS,
+~58 calls/step — E18 measured cuBLAS fp16 GEMM at 17 GB/s for b8 shapes)** ·
+GDN core ~10% (incl. einsum) · comms 5–9% · attention negligible ·
+elementwise/copies rest. The "138 ms floor" was partly weight traffic in
+disguise: the F16 in_proj mm. Puzzle: E23 (all-quant, in_proj q6_K via v2 at
+66 GB/s) should have banked most of that 17% but TIED — profiling the
+all-quant config (E25) to find the leak.
+
+1. Floor attack: after E25, targets are (a) F16-matvec v2-style kernel for
+   the F16 in_proj path or promote all-quant once its leak is fixed,
+   (b) GDN CUDA port (~10%), (c) comms (small, knobs dead).
+2. Per-type RPB mix (q4_K RPB1 / q6_K RPB2) — backlog, ~+1-2 est.
 4. ~~DP4~~ **DP4 measured-negative at mns=64 (2026-07-06):** 4 concurrent
    TP=4 engines: loads 4 min → 38 min (15× CPU/page-cache thrash), b64
    decode still unfinished at 3600 s timeout (solo: 77 s). Host-staged
