@@ -1151,13 +1151,23 @@ static __device__ __forceinline__ uint32_t __vsub4(const uint32_t a, const uint3
 }
 #endif // defined(USE_ROCM)
 
-// CUDA below cc 6.1 has no __dp4a intrinsic; fall back to 4 scalar int8
-// mul-adds (still memory-bound at decode). Mirrors llama.cpp's
-// ggml_cuda_dp4a fallback for pre-Pascal parts.
+// CUDA below cc 6.1 has no __dp4a intrinsic; fall back to scalar int8
+// mul-adds. Mirrors llama.cpp's ggml_cuda_dp4a fallback for pre-Pascal
+// parts. On Maxwell a 32-bit IMAD lowers to ~3 XMADs, so the fallback keeps
+// the products in 16-bit (one XMAD each): MAXWELL_DP4A_SHORT (default 1)
+// selects that form; 0 restores plain int math for A/B.
 #if !defined(USE_ROCM) && defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 610
+#ifndef MAXWELL_DP4A_SHORT
+#define MAXWELL_DP4A_SHORT 1
+#endif
 static __device__ __forceinline__ int __dp4a(const int a, const int b, int c) {
     const int8_t* a8 = (const int8_t*)&a;
     const int8_t* b8 = (const int8_t*)&b;
+#if MAXWELL_DP4A_SHORT
+    return c + (int)((short)a8[0]*(short)b8[0] + (short)a8[1]*(short)b8[1])
+             + (int)((short)a8[2]*(short)b8[2] + (short)a8[3]*(short)b8[3]);
+#else
     return c + a8[0]*b8[0] + a8[1]*b8[1] + a8[2]*b8[2] + a8[3]*b8[3];
+#endif
 }
 #endif // !defined(USE_ROCM) && __CUDA_ARCH__ < 610

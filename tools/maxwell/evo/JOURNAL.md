@@ -75,12 +75,15 @@ string-id QKV too, in all prior runs**. Fix: stack padded shards in logical
 order at load; when all shards share type+width, run ONE fused matmul, no
 cat. Both models should gain.
 
+| E16 | q4km+fastpath (loader) | FIXED.gguf, single-matmul merged | 22.7 | 16.0 | 145s | ✓ | fast path ≈ null (+0.2 vs E14): per-shard overhead was NOT the cost. All-quant still loses to F16 in_proj despite 3.6× fewer bytes → **Q4_K MMVQ must be far below assumed 72% eff on some shapes** — measure (E18) |
+| E16b | f16+fastpath (control) | champion cfg | 23.5 | 16.9 | 153s | ✓ | champion held; fast path harmless. Keep it (correctness + cleanliness), keep F16INPROJ as perf champion |
+| E17 | mns128 (scheduling) | mns=128, b 64/96/128 | — | 16.8 | 159s | ✓ | **knee found ≈64–96**: 110.3 / 101.5 (pad-to-128 artifact) / **122.2 @128** — one-engine peak. Serving sweet spot mns=64 (1.7 tok/s/user) or 128 (+11% aggregate at 0.95/user) |
+
 ## In flight
 
-- E16 q4km / E16b f16: single-matmul fast path A/B on both models, champion
-  config. FIXED.gguf should now beat F16INPROJ (fewer bytes AND no split
-  overhead).
-- E17 mns128: aggregate ceiling, b 64/96/128 (106.6 @64 so far).
+- E18 bw-microbench: sidecar MMVQ GB/s per quant type/shape vs 73 GB/s
+  ceiling + F16 GEMV reference (in_proj anomaly: F16 GEMV beat Q4_K MMVQ).
+  Decides kernel-tuning upside for batch-8 (8× re-read) and single.
 
 ## Backlog (families)
 

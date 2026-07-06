@@ -19,12 +19,18 @@ _gguf_inc = os.path.join(_repo, "csrc", "libtorch_stable", "quantization", "gguf
 _csrc_inc = os.path.join(_repo, "csrc")
 
 _mmv_y = int(os.environ.get("MAXWELL_EVO_MMV_Y", "1"))
+_dp4a_short = int(os.environ.get("MAXWELL_EVO_DP4A_SHORT", "1"))
+_msum = int(os.environ.get("MAXWELL_EVO_Q4K_MSUM", "0"))
+_no_u = int(os.environ.get("MAXWELL_EVO_BENCH_NO_U", "0"))  # bench-only!
 _ext = load(
-    name=f"maxwell_evo_mmvq_y{_mmv_y}",
+    name=f"maxwell_evo_mmvq_y{_mmv_y}s{_dp4a_short}m{_msum}n{_no_u}",
     sources=[os.path.join(_dir, "mmvq_sidecar.cu")],
     extra_include_paths=[_gguf_inc, _csrc_inc],
     extra_cuda_cflags=["-O3", "-gencode", "arch=compute_50,code=sm_50",
-                       f"-DGGML_CUDA_MMV_Y={_mmv_y}"],
+                       f"-DGGML_CUDA_MMV_Y={_mmv_y}",
+                       f"-DMAXWELL_DP4A_SHORT={_dp4a_short}",
+                       f"-DMAXWELL_Q4K_MSUM_HOIST={_msum}",
+                       f"-DMAXWELL_BENCH_NO_U={_no_u}"],
     verbose=os.environ.get("MAXWELL_EVO_VERBOSE") == "1",
 )
 
