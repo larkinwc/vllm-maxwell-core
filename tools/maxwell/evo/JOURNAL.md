@@ -114,7 +114,13 @@ never rsync the sidecar while engines are queued.
 2. RPB=2 microbench — v2 rows_per_block for b1 q8 reuse (single 17.3 → ?).
 3. All-quant retest under v2 (E23): FIXED.gguf byte savings now that the
    fused path runs at 60+ GB/s (E16's loss was at 33 GB/s kernels).
-4. DP4 rerun queued (pre-v2 env; b64 rides MMQ anyway).
+4. ~~DP4~~ **DP4 measured-negative at mns=64 (2026-07-06):** 4 concurrent
+   TP=4 engines: loads 4 min → 38 min (15× CPU/page-cache thrash), b64
+   decode still unfinished at 3600 s timeout (solo: 77 s). Host-staged
+   NCCL all-reduce ×4 engines shares one DDR4-2133 bus — DP replicas do
+   NOT scale at high concurrency on this box. Revisit only with staggered
+   loads + reduced per-engine concurrency + host-BW profiling. Per-engine
+   records unaffected.
 
 ## Backlog (families)
 
