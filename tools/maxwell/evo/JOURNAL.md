@@ -61,14 +61,26 @@ all-F16 layers route to `UnquantizedLinearMethod` (direct writes, no concat)
 in_proj rewrite (31% of model bytes → ~5%), ≈ +9% on every config, +2.25 GiB
 back, and the whole fix_gguf pipeline simplifies to default mode.
 
+| E11 | mmvy2 (kernel-tune) | +MMV_Y=2 | 23.7 | 16.8 | 150s | ✓ | exact NULL vs champion — tyangpu1's +2% doesn't replicate on C4130/K-quants. Closed, Y=1 stays |
+| E13 | mns64 (scheduling) | mns=64, b 32/48/64 | — | 16.6 | 222s | ✓ | **still no knee: 64.2/87.1/106.6 aggregate @ b64** (per-seq 1.67). One TP=4 engine = 4.5× old TP=16 record. mns=128 next; DP 4×engines ≈ 400+ tok/s box potential |
+
+| E14 | q4km-sorted (loader-fix) | FIXED.gguf + sorted shards | 22.5 | 15.8 | 171s | **✓ COHERENT** | **root cause #2 CONFIRMED** — plain-quant in_proj works with sorted concat. But SLOWER than F16 champion: the merged path pays 4 matmuls + 4 activation quantizes + cat per call, eating the byte savings |
+| E15 | f16-control | champion cfg + sorted() | 23.6 | 16.7 | 146s | ✓ | exact champion repro — sorted() no-op for F16 (unquantized method), no regression |
+
+## Root cause #2 addendum → E16 (merged-shard single-matmul fast path)
+
+`apply()` ran N fused matmuls + N q8_1 activation quantizes + torch.cat for
+every merged layer on every call — not just in_proj: **every gate_up MLP and
+string-id QKV too, in all prior runs**. Fix: stack padded shards in logical
+order at load; when all shards share type+width, run ONE fused matmul, no
+cat. Both models should gain.
+
 ## In flight
 
-- E11 mmvy2: GGML_CUDA_MMV_Y=2 on champion (tyangpu1 prior: +2%).
-- E13 mns64: aggregate ceiling, b 32/48/64 (E3 said no knee at 32).
-- E14 q4km-sorted: FIXED.gguf + sorted-shard fix + fused MMVQ. Predict
-  coherent at ~26 batch-8 / ~18 single (per-die weight bytes 1.95→1.57 GB).
-- E15 f16-control: champion config under sorted() — regression gate
-  (expected no-op; F16 path doesn't touch the sorted code).
+- E16 q4km / E16b f16: single-matmul fast path A/B on both models, champion
+  config. FIXED.gguf should now beat F16INPROJ (fewer bytes AND no split
+  overhead).
+- E17 mns128: aggregate ceiling, b 64/96/128 (106.6 @64 so far).
 
 ## Backlog (families)
 
