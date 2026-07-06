@@ -93,6 +93,17 @@ data + ds; at b1 the q8 row (4.6 KB) is re-read by every one of 12288/2
 warp-iterations → q8 L2 traffic ≈ 2× weight DRAM traffic. L2 round-trip
 may be the ~34 GB/s cap.
 
+NO_U result: 38.8 → 48.1 GB/s (+24%) — q8 traffic confirmed as a real
+component; remaining 48→67 gap = weight access pattern + unpack.
+
+| E19 engine (msum) | — | **24.3 / 17.3 — new champion**, coherent (load 219s) |
+| v2 kernel (ncols_dst≤8 weight reuse + q8 row reuse, q4_K/q6_K) | q4_K b8 59.5 GB/s eff (+55%), q6_K b8 66.5 (+96%, at F16 ceiling), b1 neutral | numerics PASS all types/batches. Dispatch: v1 at b1, v2 at b2..16, MMQ/dequant above. Engine A/B = E20/E21 |
+
+DP4 first attempt crashed: mid-flight deploy changed the JIT extension
+name and 4 engines raced a build containing a duplicate-include compile
+error (ggml-common.h has no include guards). Fixed; rerun chained. Lesson:
+never rsync the sidecar while engines are queued.
+
 ## Backlog (families)
 
 - mmvq-sync: llama.cpp-master kernel refresh + SoA K-quant layout (Q6_K worst:
