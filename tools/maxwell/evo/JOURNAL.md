@@ -39,13 +39,15 @@ harness, 2026-07-05); evo-harness baseline below is the comparison anchor.
   batch-8 at ~37 tok/s (138 ms floor) — the floor itself is the other half
   of the problem (profile: E9).
 
+| E6 | mmvq8 (mmvq-fix) | +MAXWELL_EVO_MMVQ_MAX=8 | **23.6** | 16.8 | 148s | ✓ | **NEW CHAMPION batch-8 (+27%)**. MMVQ for all decode sizes beats MMQ/dequant, close to the ~26 model prediction. TP=4 now EQUALS TP=16's crown at 1/4 the dies, 1/5 the load |
+| E7 | knee-mmq (mmq) | mmvq+mmq, mns=32, b 8/16/32 | 18.6 | 16.7 | 150s | ✓ | 18.6/35.2/64.0 ≈ dequant knee (18.5/33.6/63.6). MMQ family is a NULL at every batch — closed |
+| E8 | tp16-mmvq (validation) | TP=16, hybrid | 23.7 | 10.8 | 772s | ✓ | single 3.9→10.8 (+177%) but < TP=4's 16.8 — TP=16 fixed floor dominates. batch-8 23.7 unchanged (dispatch above mmvq_safe). TP=4 is the platform |
+| E9 | profile (Tier 0.1) | eager traces b1/b8 | — | — | — | — | b1: host-staged allreduce ≈75% of GPU time (record_param_comms 1.5 ms/call × 52/token ≈ the 30 ms single floor) — comms already known dead end ⇒ single-stream ≈ ceiling. b8 (dequant): mm 27% + dequantize 15% + copies ~35% ⇒ weight path, as modeled |
+
 ## In flight
 
-- E6 mmvq8: MAXWELL_EVO_MMVQ_MAX=8 — MMVQ for all decode sizes. Expect ~26.
-- E7 knee-mmq: mmvq+mmq, mns=32, batches 8/16/32 — does MMQ beat dequant at
-  16/32 aggregate? (dequant knee: 33.6/63.6).
-- E8 tp16-mmvq: champion config at TP=16 (weights/die 390 MB → 5.3 ms read;
-  dequant TP=16 was 23.5 batch / 3.9 single).
+- E10 crossover: MMVQ_MAX=12 + mmq policy, mns=32, b 8/12/16/32 — dispatch
+  curve + champion validation under mns=32 graphs. Model: MMVQ wins ≤~13.
 
 ## Backlog (families)
 

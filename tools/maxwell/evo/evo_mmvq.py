@@ -18,11 +18,13 @@ _repo = os.path.normpath(os.path.join(_dir, "..", "..", ".."))
 _gguf_inc = os.path.join(_repo, "csrc", "libtorch_stable", "quantization", "gguf")
 _csrc_inc = os.path.join(_repo, "csrc")
 
+_mmv_y = int(os.environ.get("MAXWELL_EVO_MMV_Y", "1"))
 _ext = load(
-    name="maxwell_evo_mmvq",
+    name=f"maxwell_evo_mmvq_y{_mmv_y}",
     sources=[os.path.join(_dir, "mmvq_sidecar.cu")],
     extra_include_paths=[_gguf_inc, _csrc_inc],
-    extra_cuda_cflags=["-O3", "-gencode", "arch=compute_50,code=sm_50"],
+    extra_cuda_cflags=["-O3", "-gencode", "arch=compute_50,code=sm_50",
+                       f"-DGGML_CUDA_MMV_Y={_mmv_y}"],
     verbose=os.environ.get("MAXWELL_EVO_VERBOSE") == "1",
 )
 

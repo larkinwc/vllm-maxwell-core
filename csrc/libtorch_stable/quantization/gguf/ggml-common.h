@@ -6,7 +6,9 @@
 #define CUDA_DEQUANTIZE_BLOCK_SIZE 256
 #define CUDA_QUANTIZE_BLOCK_SIZE 256
 #define GGML_CUDA_DMMV_X 32
+#ifndef GGML_CUDA_MMV_Y
 #define GGML_CUDA_MMV_Y 1
+#endif
 
 
 // Data Structures
