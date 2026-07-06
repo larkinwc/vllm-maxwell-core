@@ -10,11 +10,11 @@ are not re-run.
 
 | metric | session start | current champion | Δ | config |
 |---|---|---|---|---|
-| batch-8 tok/s (fitness) | 18.5 | **34.3** | **+85%** | E20: TP4-CG, MAXWELL_EVO_MMVQ=1 MMVQ_MAX=8 Q4K_MSUM=1 **V2=1** |
-| single-stream tok/s | 4.4 | **17.3** | **3.9×** | same |
-| batch-16 | — | 39.0 | — | +MMVQ_MAX=16 (v2 ≤16) |
-| batch-32 | 63.6 | 66.3 | +4% | MMQ above 16 |
-| one-engine aggregate | — | **122.2** @ b128 | — | mns=128; knee ≈64–96 |
+| batch-8 tok/s (fitness) | 18.5 | **37.8** | **+104% (2.04×)** | E29: TP4-CG, **FIXED.gguf** (all-quant, sorted+grouped loader), MAXWELL_EVO_MMVQ=1 MMVQ_MAX=8 Q4K_MSUM=1 V2=1, per-type RPB (q4_K=1, q6_K=2) |
+| single-stream tok/s | 4.4 | **17.3** | **3.9×** | F16INPROJ model, same env (all-quant: 16.5) |
+| batch-16 | — | 40.2 | — | +MMVQ_MAX=16 (v2 ≤16) |
+| batch-32 / 64 | 63.6 / — | 63.8 / 106.0 | — | MMQ above 16 |
+| one-engine aggregate | — | **122.2** @ b128 | — | mns=128 (F16 model; champion-model cell in flight) |
 
 Root causes fixed: (1) vecdotq impl bodies compiled EMPTY below cc 6.1;
 (2) merged-GGUF shards concatenated in file order (upstream vLLM bug, also
@@ -149,11 +149,23 @@ Closed: all-Q6_K in_proj GGUF regen (gguf-py can't quantize Q6_K,
 NotImplementedError; llama-quantize not on box). Grouped 2-call path is the
 resting state for mixed-type fused tensors.
 
-1. Per-type RPB dispatch (q4_K RPB1 / q6_K RPB2 — q6_K b8 hit 90 GB/s eff
-   in microbench): E29 in flight.
-2. GDN CUDA port (~10% of b8 step) — next kernel family if E29 lands small.
-3. Comms (~6-9%): knobs measured dead; quantized/compressed allreduce is the
-   only remaining idea, big effort.
+| E29 | rpbmix (kernel-tune) | per-type RPB (q4_K=1, q6_K=2) | **37.8** | 16.5 | 143s | ✓ | **CHAMPION +7.4%** — fitness metric doubled for the session (18.5→37.8) |
+| E27 | agg revalidation | champion model, mns=64 | — | 16.5 | 151s | ✓ | 40.2/63.8/106.0 @ 16/32/64 — b16 +1.2 from v2/rpb; b32+ unchanged (MMQ path) |
+
+## Top backlog after the doubling
+
+1. **GDN decode block fusion (E31 family, biggest remaining single item):**
+   eager b8 shows qwen_gdn_attention_core ≈ 2.5 ms CUDA-total per call × 24
+   layers — conv1d update + gating einsums + Triton recurrence + norm as
+   separate kernels. A fused CUDA GDN-decode kernel (llama.cpp
+   gated_delta_net.cu as reference for the recurrence) could take ~10-15%
+   off the b8 step. Substantial port (~300+ lines).
+2. MMQ modernization for b>16 (llama.cpp master mmq shape) — lifts the
+   64/128-batch aggregate; moderate.
+3. Comms (~6-9%): knobs measured dead; compressed allreduce only remaining
+   idea, big effort, uncertain payoff.
+4. Prefill: torch-native GDN chunk scan dominates prefill wall (16 s of
+   einsum/permute in profiles) — TTFT lever for serving, not decode fitness.
 4. ~~DP4~~ **DP4 measured-negative at mns=64 (2026-07-06):** 4 concurrent
    TP=4 engines: loads 4 min → 38 min (15× CPU/page-cache thrash), b64
    decode still unfinished at 3600 s timeout (solo: 77 s). Host-staged
