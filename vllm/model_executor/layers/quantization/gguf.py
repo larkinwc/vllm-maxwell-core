@@ -588,26 +588,33 @@ class GGUFLinearMethod(LinearMethodBase):
             qweight = layer.qweight
             offset_map = layer.qweight.shard_offset_map
             types = layer.qweight_type.shard_weight_type
-            uniq_types = {types[idx] for idx in shard_id}
-            uniq_widths = {offset_map[idx][2] for idx in shard_id}
-            if len(uniq_types) == 1 and uniq_widths == {qweight.size(1)}:
-                # Shards are stacked in logical order with one quant type and
-                # no width padding: run the whole fused weight as a single
-                # matmul (avoids per-shard slicing, redundant activation
-                # quantization, and the output concat).
-                out = fused_mul_mat_gguf(x, qweight, next(iter(uniq_types)))
+            # Merge row-adjacent shards that share a quant type and full
+            # width into one matmul (e.g. mixed-type in_proj_qkvz becomes
+            # qkv + z = 2 calls instead of 4 small matmuls, each of which
+            # would re-quantize the activations).
+            full = qweight.size(1)
+            groups: list[list[int]] = []
+            for idx in shard_id:
+                start, end, size = offset_map[idx]
+                if (
+                    groups
+                    and size == full
+                    and groups[-1][3] == full
+                    and groups[-1][2] == types[idx]
+                    and groups[-1][1] == start
+                ):
+                    groups[-1][1] = end
+                else:
+                    groups.append([start, end, types[idx], size])
+            if len(groups) == 1 and groups[0][3] == full:
+                out = fused_mul_mat_gguf(x, qweight, groups[0][2])
             else:
-                # dequantize shard weights respectively
                 result = []
-                for idx in shard_id:
-                    start, end, offset = offset_map[idx]
-                    result.append(
-                        fused_mul_mat_gguf(
-                            x,
-                            qweight[start:end, :offset].contiguous(),
-                            types[idx],
-                        )
-                    )
+                for start, end, gtype, size in groups:
+                    w = qweight[start:end, :size]
+                    if size != full:
+                        w = w.contiguous()
+                    result.append(fused_mul_mat_gguf(x, w, gtype))
                 out = torch.cat(result, axis=1)
         else:
             qweight = layer.qweight
