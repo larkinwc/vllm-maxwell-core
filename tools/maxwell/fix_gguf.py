@@ -79,6 +79,9 @@ SKIP_KEYS = {
     "GGUF.version",
     "GGUF.tensor_count",
     "GGUF.kv_count",
+    # Already set via GGUFWriter(arch=...); re-adding here would trigger a
+    # "Duplicated key name 'general.architecture'" warning.
+    "general.architecture",
 }
 for key, field in reader.fields.items():
     if key in SKIP_KEYS:
