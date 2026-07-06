@@ -17,6 +17,21 @@ from torch.nn.parameter import Parameter, UninitializedParameter
 
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
+
+# Maxwell evo experiment hook: MAXWELL_EVO_MMVQ=1 routes fused quantized
+# matmuls through the sidecar extension (tools/maxwell/evo) whose kernels
+# carry the sm_50 __dp4a fallback, instead of the broken vendored _C path.
+_EVO_FUSED = None
+if os.environ.get("MAXWELL_EVO_MMVQ") == "1":
+    import sys as _sys
+
+    _evo_path = os.environ.get("MAXWELL_EVO_PATH") or os.path.normpath(
+        os.path.join(os.path.dirname(__file__), "..", "..", "..", "..",
+                     "tools", "maxwell", "evo")
+    )
+    if _evo_path not in _sys.path:
+        _sys.path.insert(0, _evo_path)
+    from evo_mmvq import try_fused as _EVO_FUSED
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEConfig,
     FusedMoEMethodBase,
@@ -214,6 +229,10 @@ def _fused_mul_mat_gguf(
     # there is no need to call any kernel for fp16/bf16
     if qweight_type in UNQUANTIZED_TYPES:
         return x @ qweight.T
+    if _EVO_FUSED is not None:
+        y = _EVO_FUSED(x, qweight, qweight_type, mmvq_safe)
+        if y is not None:
+            return y
     # Maxwell/sm_50 fix: the vendored quantized GGUF GEMM kernels
     # `ggml_mul_mat_vec_a8` (MMVQ) and `ggml_mul_mat_a8` (MMQ) rely on the
     # `__dp4a` int8 dot-product intrinsic, which requires compute capability

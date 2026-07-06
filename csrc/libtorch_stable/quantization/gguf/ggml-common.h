@@ -1148,3 +1148,14 @@ static __device__ __forceinline__ uint32_t __vsub4(const uint32_t a, const uint3
            (static_cast<uint8_t>(((a & 0x000000ff) >>  0) - ((b & 0x000000ff) >>  0)) <<  0);
 }
 #endif // defined(USE_ROCM)
+
+// CUDA below cc 6.1 has no __dp4a intrinsic; fall back to 4 scalar int8
+// mul-adds (still memory-bound at decode). Mirrors llama.cpp's
+// ggml_cuda_dp4a fallback for pre-Pascal parts.
+#if !defined(USE_ROCM) && defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 610
+static __device__ __forceinline__ int __dp4a(const int a, const int b, int c) {
+    const int8_t* a8 = (const int8_t*)&a;
+    const int8_t* b8 = (const int8_t*)&b;
+    return c + a8[0]*b8[0] + a8[1]*b8[1] + a8[2]*b8[2] + a8[3]*b8[3];
+}
+#endif // !defined(USE_ROCM) && __CUDA_ARCH__ < 610
