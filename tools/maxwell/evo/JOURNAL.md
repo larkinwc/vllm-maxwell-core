@@ -137,10 +137,23 @@ disguise: the F16 in_proj mm. Puzzle: E23 (all-quant, in_proj q6_K via v2 at
 66 GB/s) should have banked most of that 17% but TIED — profiling the
 all-quant config (E25) to find the leak.
 
-1. Floor attack: after E25, targets are (a) F16-matvec v2-style kernel for
-   the F16 in_proj path or promote all-quant once its leak is fixed,
-   (b) GDN CUDA port (~10%), (c) comms (small, knobs dead).
-2. Per-type RPB mix (q4_K RPB1 / q6_K RPB2) — backlog, ~+1-2 est.
+E25 (all-quant b8 profile) found the leak: fused calls 4114 → 7378
+(+102/step) — in_proj_qkvz mixes types (Q6_K qkv + Q4_K gate), which
+disabled the single-matmul path → 4 small matmuls + 4 quantizes + cat per
+GDN layer, eating the F16-mm savings.
+
+| E26 | q4km-grouped (loader) | grouped same-type shards | **35.2** | 16.5 | 145s | ✓ | **CHAMPION.** qkv+z = 2 calls. All-quant now wins batch-8; F16INPROJ keeps single-stream (17.3) since b1 in_proj rides v1 (33 GB/s) vs F16 GEMV (67) |
+| E26b | f16-grouped (control) | grouped, default model | 34.0 | 17.2 | 150s | ✓ | unchanged (its in_proj bypasses gguf apply; gate_up already single-type) |
+
+Closed: all-Q6_K in_proj GGUF regen (gguf-py can't quantize Q6_K,
+NotImplementedError; llama-quantize not on box). Grouped 2-call path is the
+resting state for mixed-type fused tensors.
+
+1. Per-type RPB dispatch (q4_K RPB1 / q6_K RPB2 — q6_K b8 hit 90 GB/s eff
+   in microbench): E29 in flight.
+2. GDN CUDA port (~10% of b8 step) — next kernel family if E29 lands small.
+3. Comms (~6-9%): knobs measured dead; quantized/compressed allreduce is the
+   only remaining idea, big effort.
 4. ~~DP4~~ **DP4 measured-negative at mns=64 (2026-07-06):** 4 concurrent
    TP=4 engines: loads 4 min → 38 min (15× CPU/page-cache thrash), b64
    decode still unfinished at 3600 s timeout (solo: 77 s). Host-staged
