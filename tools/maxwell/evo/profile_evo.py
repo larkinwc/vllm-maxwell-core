@@ -57,6 +57,13 @@ def main():
     )
 
     from vllm import LLM, SamplingParams
+    from vllm.config import CompilationConfig, CompilationMode, CUDAGraphMode
+
+    use_cudagraph = os.environ.get("BENCH_CUDAGRAPH", "0") == "1"
+    cg_cfg = CompilationConfig(
+        mode=CompilationMode.NONE,
+        cudagraph_mode=CUDAGraphMode.FULL,
+    )
 
     llm = LLM(
         model=model,
@@ -65,7 +72,8 @@ def main():
         hf_overrides={"architectures": ["Qwen3_5ForCausalLM"]},
         tensor_parallel_size=tp,
         dtype="float16",
-        enforce_eager=True,
+        enforce_eager=not use_cudagraph,
+        compilation_config=(cg_cfg if use_cudagraph else None),
         gpu_memory_utilization=0.90,
         max_model_len=2048,
         max_num_seqs=max(8, batch),
