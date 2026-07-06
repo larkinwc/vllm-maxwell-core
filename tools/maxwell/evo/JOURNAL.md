@@ -104,6 +104,18 @@ name and 4 engines raced a build containing a duplicate-include compile
 error (ggml-common.h has no include guards). Fixed; rerun chained. Lesson:
 never rsync the sidecar while engines are queued.
 
+| E20 | v2 engine (kernel) | champion env + MAXWELL_EVO_V2=1 | **34.3** | 17.3 | 148s | ✓ | **CHAMPION +41%** (24.3→34.3; +85% vs session-start 18.5). Step 233 ms ≈ 138 floor + 95 weights — model exact; floor now dominates batch-8 |
+| E21 | v2 knee | +MMVQ_MAX=16, mns=32 | 33.8 | 17.3 | 150s | ✓ | b16 39.0 (v2, beats MMQ 35.2 +11%); b32 66.3 (MMQ, unchanged). Dispatch v1@1 / v2@2–16 / MMQ@>16 validated |
+
+## Next tier (post-v2 priorities)
+
+1. Floor attack (138 ms at b8): graph-mode profile of champion step to split
+   allreduce / GDN Triton decode / paged attention / q8 quantize. (E22)
+2. RPB=2 microbench — v2 rows_per_block for b1 q8 reuse (single 17.3 → ?).
+3. All-quant retest under v2 (E23): FIXED.gguf byte savings now that the
+   fused path runs at 60+ GB/s (E16's loss was at 33 GB/s kernels).
+4. DP4 rerun queued (pre-v2 env; b64 rides MMQ anyway).
+
 ## Backlog (families)
 
 - mmvq-sync: llama.cpp-master kernel refresh + SoA K-quant layout (Q6_K worst:
