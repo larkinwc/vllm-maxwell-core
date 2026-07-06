@@ -10,6 +10,8 @@ Environment toggles:
                            on Maxwell where per-op launch overhead dominates.
   VLLM_DIST_INIT_TIMEOUT_S raise the distributed rendezvous timeout (TP>=8 on
                            M10s can exceed the default 600s during worker init).
+  BENCH_MODEL             override the GGUF path (default:
+                           ~/models/qwen35-9b/Qwen3.5-9B-F16INPROJ.gguf).
 
 Usage: tp_bench.py <TP>
 """
@@ -23,7 +25,9 @@ os.environ.setdefault("VLLM_USE_FLASHINFER_SAMPLER", "0")
 
 def main():
     tp = int(sys.argv[1])
-    model = os.path.expanduser("~/models/qwen35-9b/Qwen3.5-9B-F16INPROJ.gguf")
+    model = os.path.expanduser(
+        os.environ.get("BENCH_MODEL", "~/models/qwen35-9b/Qwen3.5-9B-F16INPROJ.gguf")
+    )
 
     from vllm import LLM, SamplingParams
     from vllm.config import CompilationConfig, CompilationMode, CUDAGraphMode
