@@ -30,13 +30,17 @@ _ext = load(
 FUSED_TYPES = frozenset({2, 3, 6, 7, 8, 10, 11, 12, 13, 14})
 
 _POLICY = os.environ.get("MAXWELL_EVO_POLICY", "mmvq")
+# Override the vendored mmvq_safe batch limit (0 = keep caller's heuristic).
+# MMVQ re-reads weights per vec, MMQ amortizes across the tile — where the
+# crossover sits on GM107 is an empirical question.
+_MMVQ_MAX = int(os.environ.get("MAXWELL_EVO_MMVQ_MAX", "0"))
 
 
 def try_fused(x, qweight, qweight_type, mmvq_safe):
     """Return fused-kernel result, or None to fall back to dequant+cuBLAS."""
     if qweight_type not in FUSED_TYPES:
         return None
-    if x.shape[0] <= mmvq_safe:
+    if x.shape[0] <= (_MMVQ_MAX if _MMVQ_MAX > 0 else mmvq_safe):
         return _ext.mul_mat_vec_a8(qweight, x, qweight_type, qweight.shape[0])
     if _POLICY == "mmvq+mmq":
         return _ext.mul_mat_a8(qweight, x, qweight_type, qweight.shape[0])
