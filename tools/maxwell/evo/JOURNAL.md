@@ -223,6 +223,16 @@ XMAD-emulated int path. Op model: ~3× less ALU per weight byte at b8 →
 weight ~65 ms → step ~105 ms → **~70 tok/s batch-8 ceiling**. This is the
 roadmap's NervanaGPU "pseudo-fp16" pattern, now demanded by data.
 
+## v3 kernel generation (2026-07-06, cont.)
+
+| iteration | q4_K b8 | q6_K b8 | q8_0 b8 | verdict |
+|---|---|---|---|---|
+| v3.0 smem-dequant+FFMA | 3.96 ms | 4.18 | — | parity with v2 — Maxwell FFMA takes no smem operand: 2 LDS + 2 FFMA per pair ≈ dp4a op count |
+| v3.1 x register-blocked over rows | **3.15 (+21%)** | 3.55 (+3%) | — | LDS/4; numerics 10× better than v1/v2 (no q8 quantize), max_rel ~0.0008 |
+| + q8_0 kernel | — | — | **1.15 ms (124 GB/s eff)** | ssm_out had been riding v1 8×-re-read (~35 ms/step) — hole closed |
+
+| E32 | v3 engine (kernel) | FIXED + V2+V3 (V3_MIN_B=2) | **42.1** | 16.5 | 146s | ✓ | **CHAMPION +11.4%; session 2.28×** (18.5→42.1). Step 190 ms; q4_K real read rate still only ~9 GB/s ⇒ ~2.5× kernel headroom remains (LDS/ALU-bound) |
+
 ## Config limit (2026-07-06)
 
 - FIXED.gguf + mns=128 + MMQ policy: EngineCore dies in stable-ABI

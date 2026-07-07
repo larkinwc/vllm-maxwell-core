@@ -13,7 +13,11 @@
 #pragma once
 
 #define V3_ROWS 8
+#ifndef V3_THREADS
 #define V3_THREADS 64
+#endif
+#define V3_NWARP (V3_THREADS / 32)
+#define V3_RPW (V3_ROWS / V3_NWARP)  // rows per warp
 
 template <int NC>
 static __global__ void mul_mat_vec_q4_K_v3(
@@ -33,9 +37,9 @@ static __global__ void mul_mat_vec_q4_K_v3(
     const int blocks_per_row = ncols / QK_K;
     const block_q4_K * x = (const block_q4_K *) vx;
 
-    float acc[V3_ROWS / 2][NC];
+    float acc[V3_RPW][NC];
 #pragma unroll
-    for (int k = 0; k < V3_ROWS / 2; ++k)
+    for (int k = 0; k < V3_RPW; ++k)
 #pragma unroll
         for (int j = 0; j < NC; ++j) acc[k][j] = 0.0f;
 
@@ -56,11 +60,11 @@ static __global__ void mul_mat_vec_q4_K_v3(
 
         // ---- unpack all owned rows' weights first (registers), then FMA
         // with x register-blocked so each LDS feeds V3_ROWS/2 FFMAs ----
-        float wlo[V3_ROWS / 2][4];
-        float whi[V3_ROWS / 2][4];
+        float wlo[V3_RPW][4];
+        float whi[V3_RPW][4];
 #pragma unroll
-        for (int k = 0; k < V3_ROWS / 2; ++k) {
-            const int row = row0 + warp + 2 * k;
+        for (int k = 0; k < V3_RPW; ++k) {
+            const int row = row0 + warp + V3_NWARP * k;
             if (row >= nrows) {
 #pragma unroll
                 for (int l = 0; l < 4; ++l) {
@@ -95,7 +99,7 @@ static __global__ void mul_mat_vec_q4_K_v3(
                 const float xl = xlo[j];
                 const float xh = xhi[j];
 #pragma unroll
-                for (int k = 0; k < V3_ROWS / 2; ++k) {
+                for (int k = 0; k < V3_RPW; ++k) {
                     acc[k][j] += wlo[k][l] * xl + whi[k][l] * xh;
                 }
             }
@@ -104,8 +108,8 @@ static __global__ void mul_mat_vec_q4_K_v3(
 
     // ---- reduce within warp (lanes cover disjoint cols) and store ----
 #pragma unroll
-    for (int k = 0; k < V3_ROWS / 2; ++k) {
-        const int row = row0 + warp + 2 * k;
+    for (int k = 0; k < V3_RPW; ++k) {
+        const int row = row0 + warp + V3_NWARP * k;
 #pragma unroll
         for (int j = 0; j < NC; ++j) {
             float t = acc[k][j];
@@ -137,9 +141,9 @@ static __global__ void mul_mat_vec_q8_0_v3(
     const int chunks_per_row = ncols / 256;
     const block_q8_0 * x = (const block_q8_0 *) vx;
 
-    float acc[V3_ROWS / 2][NC];
+    float acc[V3_RPW][NC];
 #pragma unroll
-    for (int k = 0; k < V3_ROWS / 2; ++k)
+    for (int k = 0; k < V3_RPW; ++k)
 #pragma unroll
         for (int j = 0; j < NC; ++j) acc[k][j] = 0.0f;
 
@@ -157,10 +161,10 @@ static __global__ void mul_mat_vec_q8_0_v3(
         }
         __syncthreads();
 
-        float w[V3_ROWS / 2][8];
+        float w[V3_RPW][8];
 #pragma unroll
-        for (int k = 0; k < V3_ROWS / 2; ++k) {
-            const int row = row0 + warp + 2 * k;
+        for (int k = 0; k < V3_RPW; ++k) {
+            const int row = row0 + warp + V3_NWARP * k;
             if (row >= nrows) {
 #pragma unroll
                 for (int l = 0; l < 8; ++l) w[k][l] = 0.0f;
@@ -181,7 +185,7 @@ static __global__ void mul_mat_vec_q8_0_v3(
             for (int j = 0; j < NC; ++j) {
                 const float xv = xp[j];
 #pragma unroll
-                for (int k = 0; k < V3_ROWS / 2; ++k) {
+                for (int k = 0; k < V3_RPW; ++k) {
                     acc[k][j] += w[k][l] * xv;
                 }
             }
@@ -189,8 +193,8 @@ static __global__ void mul_mat_vec_q8_0_v3(
     }
 
 #pragma unroll
-    for (int k = 0; k < V3_ROWS / 2; ++k) {
-        const int row = row0 + warp + 2 * k;
+    for (int k = 0; k < V3_RPW; ++k) {
+        const int row = row0 + warp + V3_NWARP * k;
 #pragma unroll
         for (int j = 0; j < NC; ++j) {
             float t = acc[k][j];
@@ -222,9 +226,9 @@ static __global__ void mul_mat_vec_q6_K_v3(
     const int blocks_per_row = ncols / QK_K;
     const block_q6_K * x = (const block_q6_K *) vx;
 
-    float acc[V3_ROWS / 2][NC];
+    float acc[V3_RPW][NC];
 #pragma unroll
-    for (int k = 0; k < V3_ROWS / 2; ++k)
+    for (int k = 0; k < V3_RPW; ++k)
 #pragma unroll
         for (int j = 0; j < NC; ++j) acc[k][j] = 0.0f;
 
@@ -244,10 +248,10 @@ static __global__ void mul_mat_vec_q6_K_v3(
 
         // unpack all owned rows (8 cols each) into registers, then FMA with
         // x register-blocked so each LDS feeds V3_ROWS/2 FFMAs
-        float w[V3_ROWS / 2][2][4];  // [row][ip][col-quarter]
+        float w[V3_RPW][2][4];  // [row][ip][col-quarter]
 #pragma unroll
-        for (int k = 0; k < V3_ROWS / 2; ++k) {
-            const int row = row0 + warp + 2 * k;
+        for (int k = 0; k < V3_RPW; ++k) {
+            const int row = row0 + warp + V3_NWARP * k;
             if (row >= nrows) {
 #pragma unroll
                 for (int ip = 0; ip < 2; ++ip)
@@ -283,7 +287,7 @@ static __global__ void mul_mat_vec_q6_K_v3(
                 for (int j = 0; j < NC; ++j) {
                     const float xv = xp[j];
 #pragma unroll
-                    for (int k = 0; k < V3_ROWS / 2; ++k) {
+                    for (int k = 0; k < V3_RPW; ++k) {
                         acc[k][j] += w[k][ip][l] * xv;
                     }
                 }
@@ -292,8 +296,8 @@ static __global__ void mul_mat_vec_q6_K_v3(
     }
 
 #pragma unroll
-    for (int k = 0; k < V3_ROWS / 2; ++k) {
-        const int row = row0 + warp + 2 * k;
+    for (int k = 0; k < V3_RPW; ++k) {
+        const int row = row0 + warp + V3_NWARP * k;
 #pragma unroll
         for (int j = 0; j < NC; ++j) {
             float t = acc[k][j];
