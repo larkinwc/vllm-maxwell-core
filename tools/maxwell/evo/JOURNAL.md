@@ -10,7 +10,7 @@ are not re-run.
 
 | metric | session start | current champion | Δ | config |
 |---|---|---|---|---|
-| batch-8 tok/s (fitness) | 18.5 | **37.8** | **+104% (2.04×)** | E29: TP4-CG, **FIXED.gguf** (all-quant, sorted+grouped loader), MAXWELL_EVO_MMVQ=1 MMVQ_MAX=8 Q4K_MSUM=1 V2=1, per-type RPB (q4_K=1, q6_K=2) |
+| batch-8 tok/s (fitness) | 18.5 | **49.0** | **2.65×** | E33: TP4-CG, **FIXED.gguf** (sorted+grouped loader), MMVQ=1 MMVQ_MAX=8 Q4K_MSUM=1 V2=1 **V3=1 V3_MIN_B=2 V3_THREADS=128** |
 | single-stream tok/s | 4.4 | **17.3** | **3.9×** | F16INPROJ model, same env (all-quant: 16.5) |
 | batch-16 | — | 40.2 | — | +MMVQ_MAX=16 (v2 ≤16) |
 | batch-32 / 64 | 63.6 / — | 63.8 / 106.0 | — | MMQ above 16 |
