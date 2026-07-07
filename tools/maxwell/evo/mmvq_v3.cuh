@@ -121,6 +121,91 @@ static __global__ void mul_mat_vec_q4_K_v3(
 }
 
 template <int NC>
+static __global__ void mul_mat_vec_q8_0_v3(
+        const void * __restrict__ vx, const half * __restrict__ X,
+        void * __restrict__ dst_v, const int ncols, const int nrows) {
+    __half * dst = (__half *) dst_v;
+    constexpr int PITCH = NC + 1;
+    __shared__ float xs[256 * PITCH];
+
+    const int warp = threadIdx.x / 32;
+    const int lane = threadIdx.x % 32;
+    const int row0 = V3_ROWS * blockIdx.x;
+
+    // process 256 cols per iteration = 8 q8_0 blocks; lane covers cols
+    // {lane, lane+32, ..., lane+224}, one col in each block
+    const int chunks_per_row = ncols / 256;
+    const block_q8_0 * x = (const block_q8_0 *) vx;
+
+    float acc[V3_ROWS / 2][NC];
+#pragma unroll
+    for (int k = 0; k < V3_ROWS / 2; ++k)
+#pragma unroll
+        for (int j = 0; j < NC; ++j) acc[k][j] = 0.0f;
+
+    for (int ic = 0; ic < chunks_per_row; ++ic) {
+        const int col0 = ic * 256;
+        __syncthreads();
+#pragma unroll
+        for (int j = 0; j < NC; ++j) {
+#pragma unroll
+            for (int cc = 0; cc < 256; cc += V3_THREADS) {
+                const int c = cc + threadIdx.x;
+                xs[c * PITCH + j] =
+                    __half2float(X[j * ncols + col0 + c]);
+            }
+        }
+        __syncthreads();
+
+        float w[V3_ROWS / 2][8];
+#pragma unroll
+        for (int k = 0; k < V3_ROWS / 2; ++k) {
+            const int row = row0 + warp + 2 * k;
+            if (row >= nrows) {
+#pragma unroll
+                for (int l = 0; l < 8; ++l) w[k][l] = 0.0f;
+                continue;
+            }
+            const block_q8_0 * bq =
+                x + row * (ncols / QK8_0) + ic * 8;
+#pragma unroll
+            for (int l = 0; l < 8; ++l) {
+                const float d = __half2float(bq[l].d);
+                w[k][l] = d * (int)((int8_t)bq[l].qs[lane]);
+            }
+        }
+#pragma unroll
+        for (int l = 0; l < 8; ++l) {
+            const float * xp = &xs[(32 * l + lane) * PITCH];
+#pragma unroll
+            for (int j = 0; j < NC; ++j) {
+                const float xv = xp[j];
+#pragma unroll
+                for (int k = 0; k < V3_ROWS / 2; ++k) {
+                    acc[k][j] += w[k][l] * xv;
+                }
+            }
+        }
+    }
+
+#pragma unroll
+    for (int k = 0; k < V3_ROWS / 2; ++k) {
+        const int row = row0 + warp + 2 * k;
+#pragma unroll
+        for (int j = 0; j < NC; ++j) {
+            float t = acc[k][j];
+#pragma unroll
+            for (int mask = 16; mask > 0; mask >>= 1) {
+                t += __shfl_xor_sync(0xffffffff, t, mask, 32);
+            }
+            if (lane == 0 && row < nrows) {
+                dst[j * nrows + row] = __float2half(t);
+            }
+        }
+    }
+}
+
+template <int NC>
 static __global__ void mul_mat_vec_q6_K_v3(
         const void * __restrict__ vx, const half * __restrict__ X,
         void * __restrict__ dst_v, const int ncols, const int nrows) {

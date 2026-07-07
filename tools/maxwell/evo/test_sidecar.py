@@ -28,7 +28,8 @@ import evo_mmvq  # noqa: E402  (triggers JIT build)
 
 from vllm import _custom_ops as ops  # noqa: E402
 
-WANT = {gguf.GGMLQuantizationType.Q4_K: 2, gguf.GGMLQuantizationType.Q6_K: 2}
+WANT = {gguf.GGMLQuantizationType.Q4_K: 2, gguf.GGMLQuantizationType.Q6_K: 2,
+        gguf.GGMLQuantizationType.Q8_0: 1}
 
 
 def main():
@@ -66,7 +67,7 @@ def main():
                     ("mmvq_v2",
                      evo_mmvq._ext.mul_mat_vec_a8_v2(w, x, qtype, rows).float())
                 )
-            if qtype in (12, 14) and hasattr(evo_mmvq._ext, "mul_mat_vec_a8_v3"):
+            if qtype in (8, 12, 14) and hasattr(evo_mmvq._ext, "mul_mat_vec_a8_v3"):
                 checks.append(
                     ("mmvq_v3",
                      evo_mmvq._ext.mul_mat_vec_a8_v3(w, x, qtype, rows).float())

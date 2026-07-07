@@ -46,7 +46,7 @@ _V2_TYPES = frozenset({12, 14})
 # Takes precedence over v2 for its types when enabled.
 _USE_V3 = os.environ.get("MAXWELL_EVO_V3", "0") == "1"
 _V3_MIN_B = int(os.environ.get("MAXWELL_EVO_V3_MIN_B", "1"))
-_V3_TYPES = frozenset({12, 14})
+_V3_TYPES = frozenset({8, 12, 14})
 
 # GGML quant types wired up in the sidecar (standard + K-quants).
 FUSED_TYPES = frozenset({2, 3, 6, 7, 8, 10, 11, 12, 13, 14})

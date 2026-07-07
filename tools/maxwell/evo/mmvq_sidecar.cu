@@ -315,16 +315,19 @@ static void launch_v3(const void* w, const at::Half* x, void* y, int type,
   if (type == 12) {
     mul_mat_vec_q4_K_v3<NC><<<grid, block, 0, stream>>>(
         w, x_off, y_off, cols, rows);
-  } else {
+  } else if (type == 14) {
     mul_mat_vec_q6_K_v3<NC><<<grid, block, 0, stream>>>(
+        w, x_off, y_off, cols, rows);
+  } else {
+    mul_mat_vec_q8_0_v3<NC><<<grid, block, 0, stream>>>(
         w, x_off, y_off, cols, rows);
   }
 }
 
 at::Tensor mul_mat_vec_a8_v3(at::Tensor W, at::Tensor X, int64_t type,
                              int64_t row) {
-  TORCH_CHECK(type == 12 || type == 14,
-              "v3 kernel supports q4_K(12)/q6_K(14) only, got ", type);
+  TORCH_CHECK(type == 8 || type == 12 || type == 14,
+              "v3 kernel supports q8_0/q4_K/q6_K, got ", type);
   TORCH_CHECK(X.scalar_type() == at::kHalf, "v3 expects fp16 activations");
   TORCH_CHECK(X.is_contiguous(), "v3 expects contiguous activations");
   const int col = X.size(1);

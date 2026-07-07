@@ -27,7 +27,8 @@ PICKS = [
     ("blk.0.ffn_gate.weight", None),   # Q4_K [12288?, 4096]
     ("blk.0.ffn_down.weight", None),   # Q6_K [4096, 12288?]
     ("output.weight", None),           # Q6_K [151936, 4096] lm_head
-    ("blk.0.attn_qkv.weight", None),   # Q4_K in FIXED.gguf (absent in F16INPROJ)
+    ("blk.0.attn_qkv.weight", None),
+    ("blk.0.ssm_out.weight", None),   # Q4_K in FIXED.gguf (absent in F16INPROJ)
 ]
 
 
@@ -37,7 +38,7 @@ def bench_one(w, qtype, rows, cols, label):
     kernels = [("MMVQ", evo_mmvq._ext.mul_mat_vec_a8)]
     if qtype in (12, 14) and hasattr(evo_mmvq._ext, "mul_mat_vec_a8_v2"):
         kernels.append(("MMV2", evo_mmvq._ext.mul_mat_vec_a8_v2))
-    if qtype in (12, 14) and hasattr(evo_mmvq._ext, "mul_mat_vec_a8_v3"):
+    if qtype in (8, 12, 14) and hasattr(evo_mmvq._ext, "mul_mat_vec_a8_v3"):
         kernels.append(("MMV3", evo_mmvq._ext.mul_mat_vec_a8_v3))
     for kname, kfn in kernels:
         for x, tag in ((x1, "b1"), (x8, "b8")):
