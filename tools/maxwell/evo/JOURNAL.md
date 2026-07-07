@@ -252,3 +252,28 @@ roadmap's NervanaGPU "pseudo-fp16" pattern, now demanded by data.
 
 q4_K real read rate at E33 still ~10.9 GB/s — kernel remains LDS/ALU-bound;
 tile sweep + (later) double-buffered staging are the open levers.
+
+## Validation close-out (2026-07-07)
+
+- Long-form quality: PASS — 3×180-token greedy generations on the champion
+  are clean (quiz-continuation + structured <think> responses, no loops or
+  corruption). Note: heredoc drivers break vLLM spawn workers
+  (FileNotFoundError '<stdin>') — bench drivers must be real files.
+- E34 (128×16 tile): 48.8 — engine tie with E33's 49.0; V3_THREADS=128 /
+  V3_ROWS=8 stands.
+- E35 aggregate with v3 (NC=16 gate 15/15): b16 **50.3 (+25%, record)**;
+  b32 via v3 2×16-chunks = 53.3 — LOSES to MMQ (63.8): dispatch finalized
+  at MMVQ_MAX=16, MMQ above; b64 105.2 unchanged.
+
+## Final champion & dispatch (end of 2026-07-06/07 session)
+
+FIXED.gguf (all-quant, sorted+grouped loader) · TP=4 · CUDA graphs ·
+MAXWELL_EVO_MMVQ=1 MMVQ_MAX=16 Q4K_MSUM=1 V2=1 V3=1 V3_MIN_B=2
+V3_THREADS=128 POLICY=mmvq+mmq
+→ kernel dispatch: v1 MMVQ (b1) / v3 FFMA (b2–16) / MMQ (b>16) / dequant
+(non-fused types).
+
+| batch | 1 | 8 | 16 | 32 | 64 | 128 |
+|---|---|---|---|---|---|---|
+| tok/s | 16.5 (17.3 F16 model) | **49.0** | **50.3** | 63.8 | 105.2 | 122.2 (F16 model) |
+| session start | 4.4 | 18.5 | — | 63.6 | — | — |
