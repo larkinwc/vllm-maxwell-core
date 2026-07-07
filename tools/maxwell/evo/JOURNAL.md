@@ -241,3 +241,14 @@ roadmap's NervanaGPU "pseudo-fp16" pattern, now demanded by data.
   >64-seq serving on the all-quant model, drop gpu_memory_utilization or
   cap mns at 64 (106.0 tok/s validated); F16INPROJ holds the 122.2 @128
   record.
+
+## v3 tile sweep (2026-07-06, cont.)
+
+| config | q4_K b8 | q6_K b8 | engine b8 |
+|---|---|---|---|
+| 64 thr × 8 rows (v3.1) | 3.15 ms | 3.55 | 42.1 (E32) |
+| **128 thr × 8 rows** | **2.59 (+22%)** | **3.02 (+18%)** | **49.0 (E33) — CHAMPION, session 2.65×** |
+| 256×8 / 128×16 / 256×16 | sweeping | | |
+
+q4_K real read rate at E33 still ~10.9 GB/s — kernel remains LDS/ALU-bound;
+tile sweep + (later) double-buffered staging are the open levers.
