@@ -339,7 +339,11 @@ at::Tensor mul_mat_vec_a8_v3(at::Tensor W, at::Tensor X, int64_t type,
   int j = 0;
   while (j < vecs) {
     const int left = vecs - j;
-    if (left >= 8) {
+    if (left >= 16) {
+      launch_v3<16>((void*)W.data_ptr(), xp, (void*)Y.data_ptr(), type, col,
+                    row, j, row, stream);
+      j += 16;
+    } else if (left >= 8) {
       launch_v3<8>((void*)W.data_ptr(), xp, (void*)Y.data_ptr(), type, col,
                    row, j, row, stream);
       j += 8;
