@@ -37,6 +37,8 @@ def bench_one(w, qtype, rows, cols, label):
     kernels = [("MMVQ", evo_mmvq._ext.mul_mat_vec_a8)]
     if qtype in (12, 14) and hasattr(evo_mmvq._ext, "mul_mat_vec_a8_v2"):
         kernels.append(("MMV2", evo_mmvq._ext.mul_mat_vec_a8_v2))
+    if qtype in (12, 14) and hasattr(evo_mmvq._ext, "mul_mat_vec_a8_v3"):
+        kernels.append(("MMV3", evo_mmvq._ext.mul_mat_vec_a8_v3))
     for kname, kfn in kernels:
         for x, tag in ((x1, "b1"), (x8, "b8")):
             for _ in range(5):

@@ -42,6 +42,11 @@ _ext = load(
 # v2 kernel (q4_K/q6_K): weight reuse across vecs + q8 reuse across rows.
 _USE_V2 = os.environ.get("MAXWELL_EVO_V2", "0") == "1"
 _V2_TYPES = frozenset({12, 14})
+# v3 kernel (q4_K/q6_K): smem dequant + FFMA multi-vec, no q8 quantize.
+# Takes precedence over v2 for its types when enabled.
+_USE_V3 = os.environ.get("MAXWELL_EVO_V3", "0") == "1"
+_V3_MIN_B = int(os.environ.get("MAXWELL_EVO_V3_MIN_B", "1"))
+_V3_TYPES = frozenset({12, 14})
 
 # GGML quant types wired up in the sidecar (standard + K-quants).
 FUSED_TYPES = frozenset({2, 3, 6, 7, 8, 10, 11, 12, 13, 14})
@@ -58,6 +63,10 @@ def try_fused(x, qweight, qweight_type, mmvq_safe):
     if qweight_type not in FUSED_TYPES:
         return None
     if x.shape[0] <= (_MMVQ_MAX if _MMVQ_MAX > 0 else mmvq_safe):
+        if (_USE_V3 and x.shape[0] >= _V3_MIN_B
+                and qweight_type in _V3_TYPES):
+            return _ext.mul_mat_vec_a8_v3(qweight, x.contiguous(),
+                                          qweight_type, qweight.shape[0])
         # v2 amortizes weight reads across <=8 output columns — a wash at
         # batch 1 (keep v1 there), decisive from batch 2 up.
         if _USE_V2 and x.shape[0] >= 2 and qweight_type in _V2_TYPES:

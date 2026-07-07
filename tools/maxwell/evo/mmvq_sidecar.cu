@@ -13,9 +13,11 @@
 #include "cuda_compat.h"
 #include "ggml-common.h"
 #include "vecdotq.cuh"
+#include "dequantize.cuh"
 #include "mmvq.cuh"
 #include "mmq.cuh"
 #include "mmvq_v2.cuh"
+#include "mmvq_v3.cuh"
 
 // quantize_row_q8_1 copied from gguf_kernel.cu (it is not header-exposed).
 template <typename scalar_t>
@@ -300,9 +302,66 @@ at::Tensor mul_mat_vec_a8_v2(at::Tensor W, at::Tensor X, int64_t type,
   return Y;
 }
 
+// ---- v3: dequant-once + FFMA multi-vec, no activation quantization ----
+
+template <int NC>
+static void launch_v3(const void* w, const at::Half* x, void* y, int type,
+                      int cols, int rows, int j0, int y_rows,
+                      cudaStream_t stream) {
+  const dim3 grid((rows + V3_ROWS - 1) / V3_ROWS, 1, 1);
+  const dim3 block(V3_THREADS, 1, 1);
+  const half* x_off = (const half*)x + (size_t)j0 * cols;
+  void* y_off = (char*)y + (size_t)j0 * y_rows * 2;
+  if (type == 12) {
+    mul_mat_vec_q4_K_v3<NC><<<grid, block, 0, stream>>>(
+        w, x_off, y_off, cols, rows);
+  } else {
+    mul_mat_vec_q6_K_v3<NC><<<grid, block, 0, stream>>>(
+        w, x_off, y_off, cols, rows);
+  }
+}
+
+at::Tensor mul_mat_vec_a8_v3(at::Tensor W, at::Tensor X, int64_t type,
+                             int64_t row) {
+  TORCH_CHECK(type == 12 || type == 14,
+              "v3 kernel supports q4_K(12)/q6_K(14) only, got ", type);
+  TORCH_CHECK(X.scalar_type() == at::kHalf, "v3 expects fp16 activations");
+  TORCH_CHECK(X.is_contiguous(), "v3 expects contiguous activations");
+  const int col = X.size(1);
+  const int vecs = X.size(0);
+  const at::cuda::CUDAGuard device_guard(X.device());
+  auto Y = at::empty({vecs, row}, X.options());
+  cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+  const at::Half* xp = X.data_ptr<at::Half>();
+  int j = 0;
+  while (j < vecs) {
+    const int left = vecs - j;
+    if (left >= 8) {
+      launch_v3<8>((void*)W.data_ptr(), xp, (void*)Y.data_ptr(), type, col,
+                   row, j, row, stream);
+      j += 8;
+    } else if (left >= 4) {
+      launch_v3<4>((void*)W.data_ptr(), xp, (void*)Y.data_ptr(), type, col,
+                   row, j, row, stream);
+      j += 4;
+    } else if (left >= 2) {
+      launch_v3<2>((void*)W.data_ptr(), xp, (void*)Y.data_ptr(), type, col,
+                   row, j, row, stream);
+      j += 2;
+    } else {
+      launch_v3<1>((void*)W.data_ptr(), xp, (void*)Y.data_ptr(), type, col,
+                   row, j, row, stream);
+      j += 1;
+    }
+  }
+  return Y;
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("mul_mat_vec_a8_v2", &mul_mat_vec_a8_v2,
         "v2 fused GGUF matvec: ncols_dst weight reuse + q8 row reuse");
+  m.def("mul_mat_vec_a8_v3", &mul_mat_vec_a8_v3,
+        "v3 fused GGUF matvec: smem dequant + FFMA multi-vec");
   m.def("mul_mat_vec_a8", &mul_mat_vec_a8,
         "fused GGUF quantized matvec (MMVQ, sm_50-safe dp4a)");
   m.def("mul_mat_a8", &mul_mat_a8,

@@ -66,6 +66,11 @@ def main():
                     ("mmvq_v2",
                      evo_mmvq._ext.mul_mat_vec_a8_v2(w, x, qtype, rows).float())
                 )
+            if qtype in (12, 14) and hasattr(evo_mmvq._ext, "mul_mat_vec_a8_v3"):
+                checks.append(
+                    ("mmvq_v3",
+                     evo_mmvq._ext.mul_mat_vec_a8_v3(w, x, qtype, rows).float())
+                )
             scale = ref.abs().max().clamp(min=RTOL_DENOM)
             for name, got in checks:
                 rel = ((got - ref).abs().max() / scale).item()
