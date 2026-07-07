@@ -12,7 +12,9 @@
 // NOTE: include after ggml-common.h / vecdotq.cuh / dequantize.cuh.
 #pragma once
 
+#ifndef V3_ROWS
 #define V3_ROWS 8
+#endif
 #ifndef V3_THREADS
 #define V3_THREADS 64
 #endif
