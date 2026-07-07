@@ -54,13 +54,22 @@ static __global__ void mul_mat_vec_q4_K_v3(
         }
         __syncthreads();
 
-        // ---- per owned row: unpack 8 cols once, FMA against all vecs ----
+        // ---- unpack all owned rows' weights first (registers), then FMA
+        // with x register-blocked so each LDS feeds V3_ROWS/2 FFMAs ----
+        float wlo[V3_ROWS / 2][4];
+        float whi[V3_ROWS / 2][4];
 #pragma unroll
         for (int k = 0; k < V3_ROWS / 2; ++k) {
             const int row = row0 + warp + 2 * k;
-            if (row >= nrows) break;
+            if (row >= nrows) {
+#pragma unroll
+                for (int l = 0; l < 4; ++l) {
+                    wlo[k][l] = 0.0f;
+                    whi[k][l] = 0.0f;
+                }
+                continue;
+            }
             const block_q4_K * bq = x + row * blocks_per_row + ib;
-
             const uint8_t * q = bq->qs + 32 * il + 4 * ir;
             const float dall = __low2float(bq->dm);
             const float dmin = __high2float(bq->dm);
@@ -71,16 +80,23 @@ static __global__ void mul_mat_vec_q4_K_v3(
             get_scale_min_k4(2 * il + 1, bq->scales, sc, m);
             const float d2 = dall * sc;
             const float m2 = dmin * m;
-
 #pragma unroll
             for (int l = 0; l < 4; ++l) {
-                const float wlo = d1 * (q[l] & 0xF) - m1;
-                const float whi = d2 * (q[l] >> 4) - m2;
-                const float * xlo = &xs[(c0 + l) * PITCH];
-                const float * xhi = &xs[(c0 + 32 + l) * PITCH];
+                wlo[k][l] = d1 * (q[l] & 0xF) - m1;
+                whi[k][l] = d2 * (q[l] >> 4) - m2;
+            }
+        }
 #pragma unroll
-                for (int j = 0; j < NC; ++j) {
-                    acc[k][j] += wlo * xlo[j] + whi * xhi[j];
+        for (int l = 0; l < 4; ++l) {
+            const float * xlo = &xs[(c0 + l) * PITCH];
+            const float * xhi = &xs[(c0 + 32 + l) * PITCH];
+#pragma unroll
+            for (int j = 0; j < NC; ++j) {
+                const float xl = xlo[j];
+                const float xh = xhi[j];
+#pragma unroll
+                for (int k = 0; k < V3_ROWS / 2; ++k) {
+                    acc[k][j] += wlo[k][l] * xl + whi[k][l] * xh;
                 }
             }
         }
@@ -141,36 +157,50 @@ static __global__ void mul_mat_vec_q6_K_v3(
         }
         __syncthreads();
 
+        // unpack all owned rows (8 cols each) into registers, then FMA with
+        // x register-blocked so each LDS feeds V3_ROWS/2 FFMAs
+        float w[V3_ROWS / 2][2][4];  // [row][ip][col-quarter]
 #pragma unroll
         for (int k = 0; k < V3_ROWS / 2; ++k) {
             const int row = row0 + warp + 2 * k;
-            if (row >= nrows) break;
+            if (row >= nrows) {
+#pragma unroll
+                for (int ip = 0; ip < 2; ++ip)
+#pragma unroll
+                    for (int l = 0; l < 4; ++l) w[k][ip][l] = 0.0f;
+                continue;
+            }
             const block_q6_K * bq = x + row * blocks_per_row + ib;
             const float d = __half2float(bq->d);
-
-            // each lane covers cols {128*ip + il + 0,32,64,96} for ip=0,1
 #pragma unroll
             for (int ip = 0; ip < 2; ++ip) {
                 const uint8_t ql0 = bq->ql[64 * ip + il];
                 const uint8_t ql32 = bq->ql[64 * ip + il + 32];
                 const uint8_t qh = bq->qh[32 * ip + il];
                 const int8_t * sc = bq->scales + 8 * ip + is0;
-                const int cbase = 128 * ip + il;
-
-                const float w0 = d * sc[0]
+                w[k][ip][0] = d * sc[0]
                     * (int8_t)(((ql0 & 0xF) | (((qh >> 0) & 3) << 4)) - 32);
-                const float w32 = d * sc[2]
+                w[k][ip][1] = d * sc[2]
                     * (int8_t)(((ql32 & 0xF) | (((qh >> 2) & 3) << 4)) - 32);
-                const float w64 = d * sc[4]
+                w[k][ip][2] = d * sc[4]
                     * (int8_t)(((ql0 >> 4) | (((qh >> 4) & 3) << 4)) - 32);
-                const float w96 = d * sc[6]
+                w[k][ip][3] = d * sc[6]
                     * (int8_t)(((ql32 >> 4) | (((qh >> 6) & 3) << 4)) - 32);
+            }
+        }
+#pragma unroll
+        for (int ip = 0; ip < 2; ++ip) {
+            const int cbase = 128 * ip + il;
+#pragma unroll
+            for (int l = 0; l < 4; ++l) {
+                const float * xp = &xs[(cbase + 32 * l) * PITCH];
 #pragma unroll
                 for (int j = 0; j < NC; ++j) {
-                    acc[k][j] += w0 * xs[(cbase + 0) * PITCH + j]
-                               + w32 * xs[(cbase + 32) * PITCH + j]
-                               + w64 * xs[(cbase + 64) * PITCH + j]
-                               + w96 * xs[(cbase + 96) * PITCH + j];
+                    const float xv = xp[j];
+#pragma unroll
+                    for (int k = 0; k < V3_ROWS / 2; ++k) {
+                        acc[k][j] += w[k][ip][l] * xv;
+                    }
                 }
             }
         }
