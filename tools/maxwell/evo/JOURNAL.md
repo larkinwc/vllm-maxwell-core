@@ -202,6 +202,27 @@ resting state for mixed-type fused tensors.
   in merged split (linear.py) — may be MOOT if E4 lands (dp4a fix could cover
   the in_proj path too; retest FIXED.gguf with sidecar once E4 is green).
 
+## E31 GDN port: CLOSED (measured unnecessary, 2026-07-06)
+
+`bench_gdn.py` isolated the FLA Triton packed-decode kernel: 63.1 GB/s
+state-BW at b8 (86% ceiling), 69.8 at b32 (96%), 3.2 ms/step across 24
+layers at b8 = 1.5% of the step. Already near-optimal; the eager profile's
+"GDN ~10%" was launch-gap inflation around it. Do not port.
+
+## v2 is ALU-bound at b8 → v3 design (the next mountain)
+
+Re-derived from the microbench: ffn_gate (28.3 MB) at b8 takes 3.81 ms =
+7.4 GB/s REAL DRAM — v2 amortizes loads across 8 columns but pays the full
+software-dp4a vec-dot per column (b8 ≈ 4.8× b1 on identical bytes). Weight
+kernels ≈ 190 ms of the 212 ms champion step.
+
+v3: dequantize each weight tile ONCE to smem/registers (fp16/fp32), then
+FFMA against all ≤8 fp16 activation vectors directly — no q8_1 activation
+quantization at all (numerics improve). FFMA is native 128/SMM/clk vs the
+XMAD-emulated int path. Op model: ~3× less ALU per weight byte at b8 →
+weight ~65 ms → step ~105 ms → **~70 tok/s batch-8 ceiling**. This is the
+roadmap's NervanaGPU "pseudo-fp16" pattern, now demanded by data.
+
 ## Config limit (2026-07-06)
 
 - FIXED.gguf + mns=128 + MMQ policy: EngineCore dies in stable-ABI
