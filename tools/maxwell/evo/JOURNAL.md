@@ -277,3 +277,28 @@ V3_THREADS=128 POLICY=mmvq+mmq
 |---|---|---|---|---|---|---|
 | tok/s | 16.5 (17.3 F16 model) | **49.0** | **50.3** | 63.8 | 105.2 | 122.2 (F16 model) |
 | session start | 4.4 | 18.5 | — | 63.6 | — | — |
+
+## TTFT arc (2026-07-07): MMQ was strangling prefill
+
+| config | prefill tok/s (128/512/1024) | TTFT @512 |
+|---|---|---|
+| champion + POLICY=mmvq+mmq | 43.1 / 44.0 / 43.9 (flat) | 11.65 s |
+| champion + POLICY=mmvq (dequant prefill) | 74.6 / 86.1 / **85.9** | **5.94 s (2×)** |
+
+MMQ (software-dp4a tiles) handled every prefill chunk; dequant+cuBLAS wins
+at prefill arithmetic intensity. MMQ tied dequant at b32/64 anyway (E3/E7/
+E13) → **MMQ dropped from the dispatch entirely.**
+
+## FINAL config (end of hillclimb arc)
+
+`Qwen3.5-9B-FIXED.gguf` · TP=4 · CUDA graphs ·
+`MAXWELL_EVO_MMVQ=1 MMVQ_MAX=16 Q4K_MSUM=1 V2=1 V3=1 V3_MIN_B=2
+V3_THREADS=128` (default policy mmvq)
+→ v1 MMVQ (b1) / v3 FFMA (b2–16) / dequant+cuBLAS (b>16 + prefill).
+
+decode: b8 49.0 · b16 50.3 · b64 ~105 · single 16.5
+prefill: ~86 tok/s (TTFT 5.9 s @512)
+
+Next mountain (designed, not started): GDN chunked-prefill CUDA port
+(llama.cpp gated_delta_net.cu full-sequence kernel) — the torch-native
+eager chunk scan is the remaining prefill wall after the MMQ fix.
