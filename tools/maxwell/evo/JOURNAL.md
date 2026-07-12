@@ -458,3 +458,32 @@ non-regression (3.042 ms > 3.017 ms) and cannot meet the two-run +1.0 co-primary
 promotion criterion. **SHELVED:** retain both Q4VEC and LDG defaults at 0; no
 two-run winner protocol or longform rerun is warranted.
 
+
+
+## E47 — occupancy and spill map (2026-07-12)
+
+Rebuilt all requested thread/row configurations with MAXWELL_EVO_PTXAS_V=1.
+For the b8 V3 kernels, ptxas reported zero stack frame and zero spill loads/stores
+in every configuration. The q4_K/q6_K/q8_0 register triplets were: 64x4
+72/56/56, 64x8 98/96/96, 128x8 71/56/56, 128x16 98/96/96, 256x8
+61/48/40, and 256x16 71/64/56.
+
+At b8, xs = 256*(8+1)*4 = 9,216 B/block; at b16 it is 17,408 B/block.
+Using sm_50 limits (64 KiB smem, 64K regs, 32 blocks, 2048 threads), the
+q4_K b8 block limits are:
+
+| threads x rows | limiting blocks/SMM | resident threads | engine b8 |
+|---|---:|---:|---:|
+| 64x4 | 7 (smem) | 448 | 35.0 |
+| 64x8 | 7 (smem) | 448 | 42.0 |
+| 128x8 | 7 (smem/register tie) | 896 | 49.2 |
+| 128x16 | 5 (registers) | 640 | 49.1 |
+| 256x8 | 4 (registers) | 1024 | 39.8 (E38--E40) |
+| 256x16 | 3 (registers) | 768 | 48.4 (E38--E40) |
+
+The two new engine runs were coherent with CUDA graphs: 64x4 b8/b16 =
+35.0/29.7 and 64x8 = 42.0/35.4 tok/s. There is no configuration sitting just
+above a shared-memory residency threshold: halving staging would not lift the
+128x8 seven-block limit (registers then bind), while the others are already
+register-limited. **No V3_CHUNK=128 probe.** 128x8 remains the champion.
+
