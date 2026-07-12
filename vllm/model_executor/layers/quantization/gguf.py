@@ -17,6 +17,21 @@ from torch.nn.parameter import Parameter, UninitializedParameter
 
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
+
+# Maxwell evo experiment hook: MAXWELL_EVO_MMVQ=1 routes fused quantized
+# matmuls through the sidecar extension (tools/maxwell/evo) whose kernels
+# carry the sm_50 __dp4a fallback, instead of the broken vendored _C path.
+_EVO_FUSED = None
+if os.environ.get("MAXWELL_EVO_MMVQ") == "1":
+    import sys as _sys
+
+    _evo_path = os.environ.get("MAXWELL_EVO_PATH") or os.path.normpath(
+        os.path.join(os.path.dirname(__file__), "..", "..", "..", "..",
+                     "tools", "maxwell", "evo")
+    )
+    if _evo_path not in _sys.path:
+        _sys.path.insert(0, _evo_path)
+    from evo_mmvq import try_fused as _EVO_FUSED
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEConfig,
     FusedMoEMethodBase,
@@ -214,6 +229,10 @@ def _fused_mul_mat_gguf(
     # there is no need to call any kernel for fp16/bf16
     if qweight_type in UNQUANTIZED_TYPES:
         return x @ qweight.T
+    if _EVO_FUSED is not None:
+        y = _EVO_FUSED(x, qweight, qweight_type, mmvq_safe)
+        if y is not None:
+            return y
     # Maxwell/sm_50 fix: the vendored quantized GGUF GEMM kernels
     # `ggml_mul_mat_vec_a8` (MMVQ) and `ggml_mul_mat_a8` (MMQ) rely on the
     # `__dp4a` int8 dot-product intrinsic, which requires compute capability
@@ -533,14 +552,18 @@ class GGUFLinearMethod(LinearMethodBase):
                 (concat_side, padded_side), dtype=dtype, device=qweight.device
             )
             # (dim0_start, dim0_end, dim1_size)
+            # Stack shards in logical output order (not GGUF load order) so
+            # apply() can run same-type layers as one fused matmul.
             shard_offset_map = dict[str, tuple[int, int, int]]()
-            for idx in shard_id:
-                id_in_container = shard_id_map[idx]
-                start = sum(x.size(0) for x in data_container[:id_in_container])
-                end = start + data_container[id_in_container].size(0)
-                size = data_container[id_in_container].size(1)
-                padded_data[start:end, :size] = data_container[id_in_container]
+            canonical = ["q", "k", "v"] if "q" in shard_id else sorted(shard_id)
+            start = 0
+            for idx in canonical:
+                data = data_container[shard_id_map[idx]]
+                end = start + data.size(0)
+                size = data.size(1)
+                padded_data[start:end, :size] = data
                 shard_offset_map[idx] = (start, end, size)
+                start = end
             qweight.data_container.clear()
             padded_param = Parameter(padded_data, requires_grad=False)
             set_weight_attrs(padded_param, vars(qweight))
@@ -556,19 +579,43 @@ class GGUFLinearMethod(LinearMethodBase):
         shard_id = layer.qweight.shard_id
 
         if shard_id:
-            # dequantize shard weights respectively
-            shard_id = ["q", "k", "v"] if "q" in shard_id else shard_id
+            # shard_id records LOAD order (GGUF file order); computation must
+            # follow the logical output layout. String ids are forced to
+            # q,k,v; integer ids (e.g. Qwen3.5 in_proj_qkvz, where attn_gate
+            # precedes attn_qkv on disk -> [3,0,1,2]) need the same
+            # canonicalization or the fused output comes out permuted.
+            shard_id = ["q", "k", "v"] if "q" in shard_id else sorted(shard_id)
             qweight = layer.qweight
-            result = []
+            offset_map = layer.qweight.shard_offset_map
+            types = layer.qweight_type.shard_weight_type
+            # Merge row-adjacent shards that share a quant type and full
+            # width into one matmul (e.g. mixed-type in_proj_qkvz becomes
+            # qkv + z = 2 calls instead of 4 small matmuls, each of which
+            # would re-quantize the activations).
+            full = qweight.size(1)
+            groups: list[list[int]] = []
             for idx in shard_id:
-                start, end, offset = layer.qweight.shard_offset_map[idx]
-                qweight_type = layer.qweight_type.shard_weight_type[idx]
-                result.append(
-                    fused_mul_mat_gguf(
-                        x, qweight[start:end, :offset].contiguous(), qweight_type
-                    )
-                )
-            out = torch.cat(result, axis=1)
+                start, end, size = offset_map[idx]
+                if (
+                    groups
+                    and size == full
+                    and groups[-1][3] == full
+                    and groups[-1][2] == types[idx]
+                    and groups[-1][1] == start
+                ):
+                    groups[-1][1] = end
+                else:
+                    groups.append([start, end, types[idx], size])
+            if len(groups) == 1 and groups[0][3] == full:
+                out = fused_mul_mat_gguf(x, qweight, groups[0][2])
+            else:
+                result = []
+                for start, end, gtype, size in groups:
+                    w = qweight[start:end, :size]
+                    if size != full:
+                        w = w.contiguous()
+                    result.append(fused_mul_mat_gguf(x, w, gtype))
+                out = torch.cat(result, axis=1)
         else:
             qweight = layer.qweight
             qweight_type = layer.qweight_type.weight_type
