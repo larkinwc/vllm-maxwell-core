@@ -32,11 +32,12 @@ invert. `fix_gguf.py` inverts all three:
    `A_log`/`dt_bias`, `conv1d` (V channels), and `out_proj` (input columns).
 
 `--f16-inproj` additionally dequantizes `in_proj_qkv`/`in_proj_z` to F16 as a
-fallback around a vLLM merged-GGUF quantized-loader path. **Still required**
-(retested 2026-07-05): the plain-quantized variant (`Qwen3.5-9B-FIXED.gguf`,
-no `--f16-inproj`) runs at full speed but emits gibberish even with the sm_50
-`__dp4a` dequant fix — the merged quantized `in_proj_qkvz` split is broken
-independently of dp4a (suspect Q4_K superblock misalignment in the split).
+fallback around a vLLM merged-GGUF quantized-loader path. It is optional with
+the current Maxwell fixes: the plain-quantized variant
+(`Qwen3.5-9B-FIXED.gguf`, without `--f16-inproj`) now loads and generates
+coherently. The earlier gibberish result was caused by the merged
+`in_proj_qkvz` split/replication path, which is fixed in `linear.py`; the
+sm_50 `__dp4a` dequant fix is also required.
 
 ## sm_50 code fixes (in the vLLM tree, not here)
 
@@ -77,8 +78,11 @@ original session):
 Extra probes (2026-07-05, TP=4 + graphs):
 - **Placement is a non-lever**: spread `CUDA_VISIBLE_DEVICES=0,4,8,12` (one die
   per board) ≈ packed `0,1,2,3` — 18.6 vs 18.5 batch, 4.5 vs 4.4 single-stream.
-- **Plain-quant in_proj still broken**: `BENCH_MODEL=…/Qwen3.5-9B-FIXED.gguf`
-  runs at 17.8 tok/s but emits gibberish (see `fix_gguf.py` section above).
+- **Plain-quant validation (latest TP4 + CUDA graphs)**:
+  `Qwen3.5-9B-FIXED.gguf` reaches 18.4 tok/s batch throughput (4.0 tok/s
+  single-stream, 177 s load), versus 18.5 tok/s for the F16-inproj baseline.
+  The Paris, arithmetic, science, and programming checks all produced
+  coherent completions.
 
 **TP=16 + CUDA graphs is the new batch-8 champion (23.5 tok/s)** — a cell never
 run before this retest; its eager 6.0 had written it off (eager numbers are
