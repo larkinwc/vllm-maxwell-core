@@ -289,14 +289,54 @@ MMQ (software-dp4a tiles) handled every prefill chunk; dequant+cuBLAS wins
 at prefill arithmetic intensity. MMQ tied dequant at b32/64 anyway (E3/E7/
 E13) → **MMQ dropped from the dispatch entirely.**
 
+## E36–E40 v3 Maxwell technique arc (2026-07-12)
+
+Fresh baseline on this box (FIXED.gguf, TP=4 + CUDA graphs, idle die 15 for
+microbench): q4_K/q6_K/q8_0 MMV3 b8 = **2.586 / 3.017 / 1.005 ms**;
+engine b8/b16/b32/b64/single = **49.1 / 50.9 / 63.7 / 105.3 / 16.5 tok/s**
+(coherent: Paris). A repeat of the explicit 128×8 champion measured 49.2
+b8 / 16.8 single, confirming the baseline anchor.
+
+| cell | candidate | q4_K / q6_K / q8_0 b8 (ms) | engine b8 | coherent | verdict |
+|---|---|---:|---:|---|---|
+| E36 | `MAXWELL_EVO_V3_DBUF=1`, 128×8 | 3.811 / 4.365 / 1.845 | 36.6 | yes | **DROP** — numerics PASS, but double-buffer staging regresses all three microbench types and engine throughput |
+| E37 | `MAXWELL_EVO_V3_LDS128=1`, 128×8 | 11.325 / 4.973 / 1.697 | 20.0 | yes | **DROP** — numerics PASS; removing the bank pad costs more than float4 LDS saves on the live engine |
+| E38 | scalar, 256×8 | 3.739 / 3.602 / 1.203 | 39.8 | yes | **DROP** — tile/occupancy regression despite q6_K microbench improvement |
+| E39 | scalar, 128×16 | 2.641 / 2.726 / 0.880 | 49.1 | yes | **DROP** — within noise but below the 128×8 champion; 128×8 wins tie-break |
+| E40 | scalar, 256×16 | 2.665 / 2.905 / 0.953 | 48.4 | yes | **DROP** — engine regression |
+
+All E36/E37 numerics gates printed `SIDECAR_TEST PASS`; every engine run was
+coherent. No A/B/C variant cleared the 49.2 tok/s b8 anchor, so the
+keep/drop rule closes this arc with both technique flags default-off and the
+E33 128×8 tile retained. The source remains env-gated for follow-up work; no
+losing flag is enabled by default.
+
+## E41 default revalidation (2026-07-12)
+
+With no `MAXWELL_EVO_V3_THREADS`, `MAXWELL_EVO_V3_ROWS`,
+`MAXWELL_EVO_V3_DBUF`, or `MAXWELL_EVO_V3_LDS128` overrides (therefore using
+the folded defaults 128×8, DBUF=0, LDS128=0), the final FIXED.gguf TP=4 + CG
+run measured:
+
+| batch | 1 / single | 8 | 16 | 32 | 64 |
+|---|---:|---:|---:|---:|---:|
+| tok/s | 16.6 | **49.3** | **51.0** | **63.8** | **105.7** |
+
+Coherence remained `Paris`; `longform_check.py` ended with `LONGFORM_DONE`
+with all three 180-token generations clean. b32/b64 stayed on the untouched
+dequant+cuBLAS path and remained at the baseline values.
+
 ## FINAL config (end of hillclimb arc)
 
 `Qwen3.5-9B-FIXED.gguf` · TP=4 · CUDA graphs ·
 `MAXWELL_EVO_MMVQ=1 MMVQ_MAX=16 Q4K_MSUM=1 V2=1 V3=1 V3_MIN_B=2
-V3_THREADS=128` (default policy mmvq)
+V3_THREADS=128` (default policy mmvq; `V3_ROWS=8`, `V3_DBUF=0`,
+`V3_LDS128=0` are the folded defaults)
 → v1 MMVQ (b1) / v3 FFMA (b2–16) / dequant+cuBLAS (b>16 + prefill).
 
-decode: b8 49.0 · b16 50.3 · b64 ~105 · single 16.5
+Latest decode: b8 **49.3** · b16 **51.0** · b32 **63.8** · b64 **105.7** ·
+single **16.6**. The CUDA-C DBUF/LDS128 arc was a negative result; E33's
+128×8 scalar v3 remains the champion.
 prefill: ~86 tok/s (TTFT 5.9 s @512)
 
 Next mountain (designed, not started): GDN chunked-prefill CUDA port
