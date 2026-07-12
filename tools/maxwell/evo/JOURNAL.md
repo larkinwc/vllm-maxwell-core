@@ -408,3 +408,29 @@ BENCH_MAX_SEQS=64; 128 generated tokens/request): b1 **16.8**, b8
 reported Capturing CUDA graphs (decode, FULL) and Graph capturing finished;
 this ladder replaces the prior anchors for subsequent gates.
 
+
+
+## E45 — Q4VEC completion gate (2026-07-12)
+
+Q4VEC was rebuilt under the CUDA-12/PTX platform configuration and remained
+correct: EVO_TEST_MAX_REL=0.05 test_sidecar.py reported SIDECAR_TEST PASS.
+Its MMV3 b8 microbench was q4_K/q6_K/q8_0 = **2.461 / 3.011 / 0.999 ms**,
+which is non-regressing against the E44 anchors (2.586 / 3.017 / 1.005 ms).
+
+The required two-run full TP=4 CUDA-graph ladders were coherent (both returned
+Paris.) and had these Q4VEC / scalar-control results:
+
+| run | b1 | b8 | b16 | b32 | b64 |
+|---|---:|---:|---:|---:|---:|
+| Q4VEC 1 | 16.9 | 50.1 | 51.5 | 63.9 | 105.8 |
+| Q4VEC 2 | 16.7 | 49.9 | 51.3 | 63.4 | 105.5 |
+| scalar 1 | 16.7 | 49.2 | 51.0 | 63.6 | 105.5 |
+| scalar 2 | 16.7 | 49.1 | 50.6 | 63.8 | 105.4 |
+
+The Q4VEC b8 gain was +0.9/+0.8 tok/s and b16 gain +0.5/+0.7 tok/s versus
+the paired controls. Both co-primary metrics are non-regressing and the old
+longform_check.py evidence remains LONGFORM_DONE, but neither co-primary
+improved by the required +1.0 tok/s in both variant runs. **SHELVED:** retain
+MAXWELL_EVO_V3_Q4VEC default 0; the experiment stays available for a future
+combined arc.
+
