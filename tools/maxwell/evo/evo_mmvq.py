@@ -12,6 +12,13 @@ Policy via MAXWELL_EVO_POLICY:
 import os
 
 from torch.utils.cpp_extension import load
+import torch
+
+if not (torch.version.cuda or "").startswith("12."):
+    raise RuntimeError(
+        f"Maxwell sidecar requires the CUDA 12.x island (got {torch.version.cuda}); "
+        "CUDA 13 removed sm_50 support."
+    )
 
 _dir = os.path.dirname(os.path.abspath(__file__))
 _repo = os.path.normpath(os.path.join(_dir, "..", "..", ".."))
@@ -29,24 +36,33 @@ _v3r = int(os.environ.get("MAXWELL_EVO_V3_ROWS", "8"))
 _v3dbuf = int(os.environ.get("MAXWELL_EVO_V3_DBUF", "0"))
 _v3lds = int(os.environ.get("MAXWELL_EVO_V3_LDS128", "0"))
 _v3q4vec = int(os.environ.get("MAXWELL_EVO_V3_Q4VEC", "0"))
+_ptxasv = int(os.environ.get("MAXWELL_EVO_PTXAS_V", "0"))
+_extra_cuda_cflags = [
+    "-O3",
+    "-gencode", "arch=compute_50,code=sm_50",
+    "-gencode", "arch=compute_50,code=compute_50",
+    f"-DGGML_CUDA_MMV_Y={_mmv_y}",
+    f"-DMAXWELL_DP4A_SHORT={_dp4a_short}",
+    f"-DMAXWELL_Q4K_MSUM_HOIST={_msum}",
+    f"-DMAXWELL_BENCH_NO_U={_no_u}",
+    f"-DMAXWELL_V2_RPB_Q4K={_rpb4}",
+    f"-DMAXWELL_V2_RPB_Q6K={_rpb6}",
+    f"-DV3_THREADS={_v3t}",
+    f"-DV3_ROWS={_v3r}",
+    f"-DV3_DBUF={_v3dbuf}",
+    f"-DV3_LDS128={_v3lds}",
+    f"-DV3_Q4VEC={_v3q4vec}",
+]
+if _ptxasv:
+    _extra_cuda_cflags.append("-Xptxas=-v")
+
 _ext = load(
     name=(f"maxwell_evo_mmvq_y{_mmv_y}s{_dp4a_short}m{_msum}n{_no_u}"
-          f"r{_rpb4}{_rpb6}t{_v3t}w{_v3r}d{_v3dbuf}l{_v3lds}q{_v3q4vec}"),
+          f"r{_rpb4}{_rpb6}t{_v3t}w{_v3r}d{_v3dbuf}l{_v3lds}q{_v3q4vec}v{_ptxasv}"),
     sources=[os.path.join(_dir, "mmvq_sidecar.cu")],
     extra_include_paths=[_gguf_inc, _csrc_inc, _dir],
-    extra_cuda_cflags=["-O3", "-gencode", "arch=compute_50,code=sm_50",
-                       f"-DGGML_CUDA_MMV_Y={_mmv_y}",
-                       f"-DMAXWELL_DP4A_SHORT={_dp4a_short}",
-                       f"-DMAXWELL_Q4K_MSUM_HOIST={_msum}",
-                       f"-DMAXWELL_BENCH_NO_U={_no_u}",
-                       f"-DMAXWELL_V2_RPB_Q4K={_rpb4}",
-                       f"-DMAXWELL_V2_RPB_Q6K={_rpb6}",
-                       f"-DV3_THREADS={_v3t}",
-                       f"-DV3_ROWS={_v3r}",
-                       f"-DV3_DBUF={_v3dbuf}",
-                       f"-DV3_LDS128={_v3lds}",
-                       f"-DV3_Q4VEC={_v3q4vec}"],
-    verbose=os.environ.get("MAXWELL_EVO_VERBOSE") == "1",
+    extra_cuda_cflags=_extra_cuda_cflags,
+    verbose=_ptxasv or os.environ.get("MAXWELL_EVO_VERBOSE") == "1",
 )
 
 # v2 kernel (q4_K/q6_K): weight reuse across vecs + q8 reuse across rows.

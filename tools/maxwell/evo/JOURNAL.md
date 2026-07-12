@@ -383,3 +383,28 @@ a stable ~1.6--1.8% b8 improvement, but below the arc's +5% target and not
 enough to justify changing the champion default without the remaining full
 batch sweep. Keep the implementation available for follow-up, but retain
 `V3_Q4VEC=0` as the default.
+
+
+## E44 — platform stability manifest and fresh ladder (2026-07-12)
+
+**Platform island.** CUDA toolkit **12.6.85**; torch
+**2.11.0a0+git70d99e9** linked against CUDA **12.6**; vLLM
+**0.1.dev17421+g6408d1c84.d20260707**; NVIDIA driver **580.159.03**.
+The Maxwell lane remains pinned to CUDA-12 wheels/images: CUDA 13 removed
+sm_50 support. evo_mmvq.py now raises before JIT compilation unless
+torch.version.cuda is 12.x (a synthetic 13.0 version raised the expected RuntimeError).
+
+The sidecar now emits both arch=compute_50,code=sm_50 and
+arch=compute_50,code=compute_50 gencode targets, preserving PTX alongside
+the Maxwell cubin. MAXWELL_EVO_PTXAS_V=1 adds -Xptxas=-v, forces verbose
+JIT output, and uses a distinct extension identity ending in v{_ptxasv}.
+The 128x8 build produced ptxas statistics; its V3 q4_K/q6_K/q8_0 b8 kernels
+used 80/72/72 registers respectively, zero spill loads/stores, and 17,408 B
+shared memory.
+
+**Fresh TP=4 CUDA-graph co-primary ladder** (FIXED.gguf; champion env;
+BENCH_MAX_SEQS=64; 128 generated tokens/request): b1 **16.8**, b8
+**49.3**, b16 **50.9**, b32 **63.7**, b64 **105.5** tok/s. The engine
+reported Capturing CUDA graphs (decode, FULL) and Graph capturing finished;
+this ladder replaces the prior anchors for subsequent gates.
+
