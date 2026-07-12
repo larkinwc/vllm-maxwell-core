@@ -342,3 +342,22 @@ prefill: ~86 tok/s (TTFT 5.9 s @512)
 Next mountain (designed, not started): GDN chunked-prefill CUDA port
 (llama.cpp gated_delta_net.cu full-sequence kernel) — the torch-native
 eager chunk scan is the remaining prefill wall after the MMQ fix.
+
+
+## E42 — profile-gated next-arc scope (2026-07-12)
+
+A rank-0 torch profiler trace of the E33 champion at b8 (FIXED.gguf, TP=4,
+enforce-eager profiling run) put `vllm::_fused_mul_mat_gguf` first at 41.11%
+of summed self-CUDA time (3.914 s / 5746 calls). The next largest entries were
+`aten::copy_` 6.22%, GDN attention 6.10%, `aten::mm` 4.87%, and parameter
+communication 3.78%. The profile therefore confirms the weight kernel as the
+cleanest graph-invariant target, while the eager-only launch/copy accounting
+should not be treated as a CUDA-graph throughput opportunity.
+
+The GGUF tensor byte census for FIXED.gguf is q4_K (type 12): 3.15 GB / 58%
+of quantized matrix bytes, q6_K (type 14): 2.28 GB / 42%, with q8_0 separate.
+A q6_K-only SoA repack would therefore leave the byte-majority q4_K path
+untouched. Contingency D remains a separate, default-off experiment; any new
+weight-layout or access arc must cover q4_K and q6_K in the full-tensor
+microbench and CUDA-graph b8 engine gates, not just q6_K. No loader change was
+made from this profiling pass.
