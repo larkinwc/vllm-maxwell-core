@@ -25,6 +25,12 @@
 #define V3_Q4_BYTE(word, l) ((uint8_t)(((word) >> (8 * (l))) & 0xffu))
 #endif
 
+#if defined(V3_LDG) && V3_LDG
+#define V3_LOAD(p) __ldg(p)
+#else
+#define V3_LOAD(p) (*(p))
+#endif
+
 template <int NC>
 static __global__ void mul_mat_vec_q4_K_v3(
         const void * __restrict__ vx, const half * __restrict__ X,
@@ -83,10 +89,11 @@ static __global__ void mul_mat_vec_q4_K_v3(
             const block_q4_K * bq = x + row * blocks_per_row + 0;
             const uint8_t * q = bq->qs + 32 * il + 4 * ir;
 #if defined(V3_Q4VEC) && V3_Q4VEC
-            const uint32_t qword = *reinterpret_cast<const uint32_t *>(q);
+            const uint32_t qword = V3_LOAD(reinterpret_cast<const uint32_t *>(q));
 #endif
-            const float dall = __low2float(bq->dm);
-            const float dmin = __high2float(bq->dm);
+            const half2 dm = V3_LOAD(&bq->dm);
+            const float dall = __low2float(dm);
+            const float dmin = __high2float(dm);
             uint8_t sc, m;
             get_scale_min_k4(2 * il + 0, bq->scales, sc, m);
             const float d1 = dall * sc;
@@ -99,7 +106,7 @@ static __global__ void mul_mat_vec_q4_K_v3(
 #if defined(V3_Q4VEC) && V3_Q4VEC
                 const uint8_t qv = V3_Q4_BYTE(qword, l);
 #else
-                const uint8_t qv = q[l];
+                const uint8_t qv = V3_LOAD(&q[l]);
 #endif
                 wlo[0][k][l] = d1 * (qv & 0xF) - m1;
                 whi[0][k][l] = d2 * (qv >> 4) - m2;
@@ -142,10 +149,11 @@ static __global__ void mul_mat_vec_q4_K_v3(
             const block_q4_K * bq = x + row * blocks_per_row + next_ib;
             const uint8_t * q = bq->qs + 32 * il + 4 * ir;
 #if defined(V3_Q4VEC) && V3_Q4VEC
-            const uint32_t qword = *reinterpret_cast<const uint32_t *>(q);
+            const uint32_t qword = V3_LOAD(reinterpret_cast<const uint32_t *>(q));
 #endif
-            const float dall = __low2float(bq->dm);
-            const float dmin = __high2float(bq->dm);
+            const half2 dm = V3_LOAD(&bq->dm);
+            const float dall = __low2float(dm);
+            const float dmin = __high2float(dm);
             uint8_t sc, m;
             get_scale_min_k4(2 * il + 0, bq->scales, sc, m);
             const float d1 = dall * sc;
@@ -158,7 +166,7 @@ static __global__ void mul_mat_vec_q4_K_v3(
 #if defined(V3_Q4VEC) && V3_Q4VEC
                 const uint8_t qv = V3_Q4_BYTE(qword, l);
 #else
-                const uint8_t qv = q[l];
+                const uint8_t qv = V3_LOAD(&q[l]);
 #endif
                 wlo[next][k][l] = d1 * (qv & 0xF) - m1;
                 whi[next][k][l] = d2 * (qv >> 4) - m2;
@@ -202,10 +210,11 @@ static __global__ void mul_mat_vec_q4_K_v3(
             const block_q4_K * bq = x + row * blocks_per_row + ib;
             const uint8_t * q = bq->qs + 32 * il + 4 * ir;
 #if defined(V3_Q4VEC) && V3_Q4VEC
-            const uint32_t qword = *reinterpret_cast<const uint32_t *>(q);
+            const uint32_t qword = V3_LOAD(reinterpret_cast<const uint32_t *>(q));
 #endif
-            const float dall = __low2float(bq->dm);
-            const float dmin = __high2float(bq->dm);
+            const half2 dm = V3_LOAD(&bq->dm);
+            const float dall = __low2float(dm);
+            const float dmin = __high2float(dm);
             uint8_t sc, m;
             get_scale_min_k4(2 * il + 0, bq->scales, sc, m);
             const float d1 = dall * sc;
@@ -218,7 +227,7 @@ static __global__ void mul_mat_vec_q4_K_v3(
 #if defined(V3_Q4VEC) && V3_Q4VEC
                 const uint8_t qv = V3_Q4_BYTE(qword, l);
 #else
-                const uint8_t qv = q[l];
+                const uint8_t qv = V3_LOAD(&q[l]);
 #endif
                 wlo[k][l] = d1 * (qv & 0xF) - m1;
                 whi[k][l] = d2 * (qv >> 4) - m2;
@@ -350,8 +359,8 @@ static __global__ void mul_mat_vec_q8_0_v3(
             const block_q8_0 * bq = x + row * (ncols / QK8_0) + 0 * 8;
 #pragma unroll
             for (int l = 0; l < 8; ++l) {
-                const float d = __half2float(bq[l].d);
-                w[0][k][l] = d * (int)((int8_t)bq[l].qs[lane]);
+                const float d = __half2float(V3_LOAD(&bq[l].d));
+                w[0][k][l] = d * (int)((int8_t)V3_LOAD(&bq[l].qs[lane]));
             }
         }
     for (int ic = 0; ic < chunks_per_row; ++ic) {
@@ -385,8 +394,8 @@ static __global__ void mul_mat_vec_q8_0_v3(
             const block_q8_0 * bq = x + row * (ncols / QK8_0) + next_ic * 8;
 #pragma unroll
             for (int l = 0; l < 8; ++l) {
-                const float d = __half2float(bq[l].d);
-                w[next][k][l] = d * (int)((int8_t)bq[l].qs[lane]);
+                const float d = __half2float(V3_LOAD(&bq[l].d));
+                w[next][k][l] = d * (int)((int8_t)V3_LOAD(&bq[l].qs[lane]));
             }
         }
             __syncthreads();
@@ -421,8 +430,8 @@ static __global__ void mul_mat_vec_q8_0_v3(
                 x + row * (ncols / QK8_0) + ic * 8;
 #pragma unroll
             for (int l = 0; l < 8; ++l) {
-                const float d = __half2float(bq[l].d);
-                w[k][l] = d * (int)((int8_t)bq[l].qs[lane]);
+                const float d = __half2float(V3_LOAD(&bq[l].d));
+                w[k][l] = d * (int)((int8_t)V3_LOAD(&bq[l].qs[lane]));
             }
         }
 #if defined(V3_LDS128) && V3_LDS128
@@ -544,12 +553,12 @@ static __global__ void mul_mat_vec_q6_K_v3(
                 continue;
             }
             const block_q6_K * bq = x + row * blocks_per_row + 0;
-            const float d = __half2float(bq->d);
+            const float d = __half2float(V3_LOAD(&bq->d));
 #pragma unroll
             for (int ip = 0; ip < 2; ++ip) {
-                const uint8_t ql0 = bq->ql[64 * ip + il];
-                const uint8_t ql32 = bq->ql[64 * ip + il + 32];
-                const uint8_t qh = bq->qh[32 * ip + il];
+                const uint8_t ql0 = V3_LOAD(&bq->ql[64 * ip + il]);
+                const uint8_t ql32 = V3_LOAD(&bq->ql[64 * ip + il + 32]);
+                const uint8_t qh = V3_LOAD(&bq->qh[32 * ip + il]);
                 const int8_t * sc = bq->scales + 8 * ip + is0;
                 w[0][k][ip][0] = d * sc[0] * (int8_t)(((ql0 & 0xF) | (((qh >> 0) & 3) << 4)) - 32);
                 w[0][k][ip][1] = d * sc[2] * (int8_t)(((ql32 & 0xF) | (((qh >> 2) & 3) << 4)) - 32);
@@ -592,12 +601,12 @@ static __global__ void mul_mat_vec_q6_K_v3(
                 continue;
             }
             const block_q6_K * bq = x + row * blocks_per_row + next_ib;
-            const float d = __half2float(bq->d);
+            const float d = __half2float(V3_LOAD(&bq->d));
 #pragma unroll
             for (int ip = 0; ip < 2; ++ip) {
-                const uint8_t ql0 = bq->ql[64 * ip + il];
-                const uint8_t ql32 = bq->ql[64 * ip + il + 32];
-                const uint8_t qh = bq->qh[32 * ip + il];
+                const uint8_t ql0 = V3_LOAD(&bq->ql[64 * ip + il]);
+                const uint8_t ql32 = V3_LOAD(&bq->ql[64 * ip + il + 32]);
+                const uint8_t qh = V3_LOAD(&bq->qh[32 * ip + il]);
                 const int8_t * sc = bq->scales + 8 * ip + is0;
                 w[next][k][ip][0] = d * sc[0] * (int8_t)(((ql0 & 0xF) | (((qh >> 0) & 3) << 4)) - 32);
                 w[next][k][ip][1] = d * sc[2] * (int8_t)(((ql32 & 0xF) | (((qh >> 2) & 3) << 4)) - 32);
@@ -638,12 +647,12 @@ static __global__ void mul_mat_vec_q6_K_v3(
                 continue;
             }
             const block_q6_K * bq = x + row * blocks_per_row + ib;
-            const float d = __half2float(bq->d);
+            const float d = __half2float(V3_LOAD(&bq->d));
 #pragma unroll
             for (int ip = 0; ip < 2; ++ip) {
-                const uint8_t ql0 = bq->ql[64 * ip + il];
-                const uint8_t ql32 = bq->ql[64 * ip + il + 32];
-                const uint8_t qh = bq->qh[32 * ip + il];
+                const uint8_t ql0 = V3_LOAD(&bq->ql[64 * ip + il]);
+                const uint8_t ql32 = V3_LOAD(&bq->ql[64 * ip + il + 32]);
+                const uint8_t qh = V3_LOAD(&bq->qh[32 * ip + il]);
                 const int8_t * sc = bq->scales + 8 * ip + is0;
                 w[k][ip][0] = d * sc[0]
                     * (int8_t)(((ql0 & 0xF) | (((qh >> 0) & 3) << 4)) - 32);

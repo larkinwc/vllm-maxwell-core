@@ -434,3 +434,27 @@ improved by the required +1.0 tok/s in both variant runs. **SHELVED:** retain
 MAXWELL_EVO_V3_Q4VEC default 0; the experiment stays available for a future
 combined arc.
 
+
+
+## E46 — LDG read-only weight-load probe (2026-07-12)
+
+Added default-off MAXWELL_EVO_V3_LDG, its V3_LDG compile definition, and a
+cache-safe G{_v3ldg} extension-name suffix. V3_LOAD uses __ldg only when the
+flag is set. It covers q4_K qword/scalar quant bytes and one local dm load,
+q6_K ql/ qh/ d, and q8_0 d/qs; q4_K scales remain ordinary sub-word reads.
+LDG scalar numerics passed SIDECAR_TEST PASS, and both engine LDG configurations
+were coherent with CUDA graphs preserved.
+
+| config | MMV3 b8 ms q4/q6/q8 | engine b8 | engine b16 |
+|---|---|---:|---:|
+| scalar | 2.565 / 3.011 / 1.003 | 49.2, 49.1 | 51.0, 50.6 |
+| Q4VEC | 2.461 / 3.011 / 0.999 | 50.1, 49.9 | 51.5, 51.3 |
+| LDG | 2.765 / 3.060 / 0.976 | 47.9 | 50.8 |
+| Q4VEC + LDG | 2.500 / 3.042 / 0.988 | 49.5 | 51.4 |
+
+LDG alone regressed q4_K microbench substantially and b8 by 1.2--1.3 tok/s.
+The combined form restores some q4 performance but still misses q6 microbench
+non-regression (3.042 ms > 3.017 ms) and cannot meet the two-run +1.0 co-primary
+promotion criterion. **SHELVED:** retain both Q4VEC and LDG defaults at 0; no
+two-run winner protocol or longform rerun is warranted.
+
