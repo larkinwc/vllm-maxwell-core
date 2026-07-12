@@ -28,9 +28,10 @@ _v3t = int(os.environ.get("MAXWELL_EVO_V3_THREADS", "128"))
 _v3r = int(os.environ.get("MAXWELL_EVO_V3_ROWS", "8"))
 _v3dbuf = int(os.environ.get("MAXWELL_EVO_V3_DBUF", "0"))
 _v3lds = int(os.environ.get("MAXWELL_EVO_V3_LDS128", "0"))
+_v3q4vec = int(os.environ.get("MAXWELL_EVO_V3_Q4VEC", "0"))
 _ext = load(
     name=(f"maxwell_evo_mmvq_y{_mmv_y}s{_dp4a_short}m{_msum}n{_no_u}"
-          f"r{_rpb4}{_rpb6}t{_v3t}w{_v3r}d{_v3dbuf}l{_v3lds}"),
+          f"r{_rpb4}{_rpb6}t{_v3t}w{_v3r}d{_v3dbuf}l{_v3lds}q{_v3q4vec}"),
     sources=[os.path.join(_dir, "mmvq_sidecar.cu")],
     extra_include_paths=[_gguf_inc, _csrc_inc, _dir],
     extra_cuda_cflags=["-O3", "-gencode", "arch=compute_50,code=sm_50",
@@ -43,7 +44,8 @@ _ext = load(
                        f"-DV3_THREADS={_v3t}",
                        f"-DV3_ROWS={_v3r}",
                        f"-DV3_DBUF={_v3dbuf}",
-                       f"-DV3_LDS128={_v3lds}"],
+                       f"-DV3_LDS128={_v3lds}",
+                       f"-DV3_Q4VEC={_v3q4vec}"],
     verbose=os.environ.get("MAXWELL_EVO_VERBOSE") == "1",
 )
 

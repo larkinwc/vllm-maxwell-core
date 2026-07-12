@@ -21,6 +21,10 @@
 #define V3_NWARP (V3_THREADS / 32)
 #define V3_RPW (V3_ROWS / V3_NWARP)  // rows per warp
 
+#if defined(V3_Q4VEC) && V3_Q4VEC
+#define V3_Q4_BYTE(word, l) ((uint8_t)(((word) >> (8 * (l))) & 0xffu))
+#endif
+
 template <int NC>
 static __global__ void mul_mat_vec_q4_K_v3(
         const void * __restrict__ vx, const half * __restrict__ X,
@@ -78,6 +82,9 @@ static __global__ void mul_mat_vec_q4_K_v3(
             }
             const block_q4_K * bq = x + row * blocks_per_row + 0;
             const uint8_t * q = bq->qs + 32 * il + 4 * ir;
+#if defined(V3_Q4VEC) && V3_Q4VEC
+            const uint32_t qword = *reinterpret_cast<const uint32_t *>(q);
+#endif
             const float dall = __low2float(bq->dm);
             const float dmin = __high2float(bq->dm);
             uint8_t sc, m;
@@ -89,8 +96,13 @@ static __global__ void mul_mat_vec_q4_K_v3(
             const float m2 = dmin * m;
 #pragma unroll
             for (int l = 0; l < 4; ++l) {
-                wlo[0][k][l] = d1 * (q[l] & 0xF) - m1;
-                whi[0][k][l] = d2 * (q[l] >> 4) - m2;
+#if defined(V3_Q4VEC) && V3_Q4VEC
+                const uint8_t qv = V3_Q4_BYTE(qword, l);
+#else
+                const uint8_t qv = q[l];
+#endif
+                wlo[0][k][l] = d1 * (qv & 0xF) - m1;
+                whi[0][k][l] = d2 * (qv >> 4) - m2;
             }
         }
     for (int ib = 0; ib < blocks_per_row; ++ib) {
@@ -129,6 +141,9 @@ static __global__ void mul_mat_vec_q4_K_v3(
             }
             const block_q4_K * bq = x + row * blocks_per_row + next_ib;
             const uint8_t * q = bq->qs + 32 * il + 4 * ir;
+#if defined(V3_Q4VEC) && V3_Q4VEC
+            const uint32_t qword = *reinterpret_cast<const uint32_t *>(q);
+#endif
             const float dall = __low2float(bq->dm);
             const float dmin = __high2float(bq->dm);
             uint8_t sc, m;
@@ -140,8 +155,13 @@ static __global__ void mul_mat_vec_q4_K_v3(
             const float m2 = dmin * m;
 #pragma unroll
             for (int l = 0; l < 4; ++l) {
-                wlo[next][k][l] = d1 * (q[l] & 0xF) - m1;
-                whi[next][k][l] = d2 * (q[l] >> 4) - m2;
+#if defined(V3_Q4VEC) && V3_Q4VEC
+                const uint8_t qv = V3_Q4_BYTE(qword, l);
+#else
+                const uint8_t qv = q[l];
+#endif
+                wlo[next][k][l] = d1 * (qv & 0xF) - m1;
+                whi[next][k][l] = d2 * (qv >> 4) - m2;
             }
         }
             __syncthreads();
@@ -181,6 +201,9 @@ static __global__ void mul_mat_vec_q4_K_v3(
             }
             const block_q4_K * bq = x + row * blocks_per_row + ib;
             const uint8_t * q = bq->qs + 32 * il + 4 * ir;
+#if defined(V3_Q4VEC) && V3_Q4VEC
+            const uint32_t qword = *reinterpret_cast<const uint32_t *>(q);
+#endif
             const float dall = __low2float(bq->dm);
             const float dmin = __high2float(bq->dm);
             uint8_t sc, m;
@@ -192,8 +215,13 @@ static __global__ void mul_mat_vec_q4_K_v3(
             const float m2 = dmin * m;
 #pragma unroll
             for (int l = 0; l < 4; ++l) {
-                wlo[k][l] = d1 * (q[l] & 0xF) - m1;
-                whi[k][l] = d2 * (q[l] >> 4) - m2;
+#if defined(V3_Q4VEC) && V3_Q4VEC
+                const uint8_t qv = V3_Q4_BYTE(qword, l);
+#else
+                const uint8_t qv = q[l];
+#endif
+                wlo[k][l] = d1 * (qv & 0xF) - m1;
+                whi[k][l] = d2 * (qv >> 4) - m2;
             }
         }
 #if defined(V3_LDS128) && V3_LDS128

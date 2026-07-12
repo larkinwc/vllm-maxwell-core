@@ -361,3 +361,25 @@ untouched. Contingency D remains a separate, default-off experiment; any new
 weight-layout or access arc must cover q4_K and q6_K in the full-tensor
 microbench and CUDA-graph b8 engine gates, not just q6_K. No loader change was
 made from this profiling pass.
+
+
+## E43 — q4_K vector weight-load probe (2026-07-12)
+
+Added `MAXWELL_EVO_V3_Q4VEC` (default `0`) to test one 32-bit aligned load
+for each q4_K four-byte lane slice, with scalar fallback and a cache-safe JIT
+extension name. The live GGUF path was kept contiguous while validating the
+experiment; the earlier non-contiguous shard slice state produced corrupted
+control output and was restored before comparison.
+
+Numerics passed (`SIDECAR_TEST PASS`) for q4_K/q6_K/q8_0, batches 1/2/8.
+The full microbench was q4_K/q6_K/q8_0 MMV3 b8 **2.450 / 2.979 / 1.008 ms**
+versus the E33 anchor **2.586 / 3.017 / 1.005 ms**: q4_K improved ~5%, q6_K
+was within noise, and q8_0 was effectively neutral.
+
+CUDA-graph TP=4 b8 engine repeats were coherent and measured **50.1** and
+**50.0 tok/s** with Q4VEC enabled, versus **49.1** and **49.2 tok/s** controls.
+The q4 vector path also passed `longform_check.py` (`LONGFORM_DONE`). This is
+a stable ~1.6--1.8% b8 improvement, but below the arc's +5% target and not
+enough to justify changing the champion default without the remaining full
+batch sweep. Keep the implementation available for follow-up, but retain
+`V3_Q4VEC=0` as the default.
