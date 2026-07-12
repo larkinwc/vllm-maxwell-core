@@ -482,8 +482,5 @@ q4_K b8 block limits are:
 | 256x16 | 3 (registers) | 768 | 48.4 (E38--E40) |
 
 The two new engine runs were coherent with CUDA graphs: 64x4 b8/b16 =
-35.0/29.7 and 64x8 = 42.0/35.4 tok/s. There is no configuration sitting just
-above a shared-memory residency threshold: halving staging would not lift the
-128x8 seven-block limit (registers then bind), while the others are already
-register-limited. **No V3_CHUNK=128 probe.** 128x8 remains the champion.
+35.0/29.7 and 64x8 = 42.0/35.4 tok/s. At b8, 128x8 is a seven-block smem/register tie; however b16 is a residency cliff: xs=17,408 B limits 128x8 to three blocks/SMM while its q4_K register footprint permits six. The V3_CHUNK=128 b16 probe is therefore authorized and remains the next open Arc C experiment; 128x8 remains the current champion pending that gate.
 
