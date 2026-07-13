@@ -568,3 +568,51 @@ path. No vllm/ edit was made. The b1 host-time observation from E9 remains a
 profiling target, but it is not evidence of an application-owned pageable
 all-reduce buffer.
 
+## E51 — standard dense GGUF family compatibility (Qwen3-8B, Llama-3.1-8B) (2026-07-12)
+
+Verified two additional 8B-class GGUF candidates with the generic TP=4
+CUDA-graph benchmark construction (no tokenizer, HF config, or patches).
+Both files contain only quant types `[0, 12, 14]`, which are in the sidecar's
+fused support set. Qwen3-8B's loader resolved `qwen3` / `Qwen3ForCausalLM`
+and reached weight loading.
+
+It then failed in the branch's standard dense-attention implementation: Triton
+ptxas parses `acq_rel` / scoped atomics that require a newer GPU architecture
+than `sm_50`. `VLLM_ATTENTION_BACKEND=TORCH_SDPA` does not exist in this
+branch; it offers only `TRITON_ATTN` and `FLEX_ATTENTION`. FA2 requires `sm80`,
+while Flex requires `torch.compile`, which is also blocked on `sm_50`.
+
+Llama-3.1-8B was verified from a loader/quant perspective: architecture
+`llama`, the same `[0, 12, 14]` quant set, and the same standard dense-attention
+family. A full engine run would provoke the same already-explained
+architectural failure, so it was not repeated.
+
+This is a large platform compatibility gap, not a GGUF loader, quant-sidecar,
+or sidecar numerical-correctness failure. No per-model decode ladder is
+justified until `sm_50`-compatible attention is implemented.
+
+
+## E52 — DeepSeek-V2-Lite compatibility (2026-07-12)
+
+Verified the DeepSeek-V2-Lite-Chat `Q4_K_M` GGUF candidate. Its quant types
+`[0, 6, 8, 12, 14]` are all in the sidecar's fused support set. The generic
+benchmark construction failed before weight load or attention compilation with
+the exact validation error:
+
+```text
+ValueError: GGUF model with architecture deepseek2 is not supported yet.
+```
+
+This is an architecture-layer gap for the MLA attention family, not a quant
+sidecar gap. Do not custom-force it or treat it as a sidecar optimization; it
+requires a scoped follow-up to implement `deepseek2` GGUF architecture support.
+
+
+## E53 — per-family ladder scope decision (2026-07-12)
+
+No new model family reached the per-model b1/b8/b16 decode ladder. Qwen3-8B
+and Llama-3.1-8B are blocked by the `sm_50` dense-attention gap, and
+DeepSeek-V2-Lite is blocked by missing `deepseek2` GGUF architecture support.
+Therefore there is no valid new-family ladder or quant-sidecar regression
+result to report; the existing Qwen3.5-9B champion is the only fully supported
+candidate under this branch's `sm_50` constraints.
