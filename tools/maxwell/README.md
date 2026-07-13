@@ -27,6 +27,62 @@ steady decode cadence, while 512 minimized the decode ITL p95 during a 1500-toke
 prefill injection. This is a decode-pool serving choice; it is not a prefill/TTFT
 optimization.
 
+## Disaggregated serving (P/D) — do not deploy on this host
+
+E56–E58 validated NIXL transfer correctness for Qwen3.5's hybrid attention +
+Mamba state, but **no P/D topology met the serving gates on the PCIe Maxwell
+sm_50 host**. Keep the E48 monolithic TP=4 decode serving recipe above; there is
+no recommended NIXL P/D production launch on this machine.
+
+The validated reproduction harnesses are deliberately outside the repository:
+
+```bash
+source $HOME/maxwell-env.sh
+
+# Full P/D/proxy invocations and the mandatory champion environment are embedded
+# in the launcher. It uses DS state layout, P=0-3, D=4-7, and proxy=8192.
+$HOME/bench_ssd/evo/disagg/launch_1p1d.sh
+
+# Same-shape warmup, then eight streaming decode requests plus a 1500-token
+# injected prompt through the repository toy proxy.
+python $HOME/bench_ssd/evo/disagg/disagg_bench.py
+```
+
+`VLLM_SSM_CONV_STATE_LAYOUT=DS` is **mandatory** for NIXL Mamba conv-state
+transfer. The launcher also exports the champion `MAXWELL_EVO_*` environment,
+`UCX_NET_DEVICES=all`, and uses the repository-provided
+`tests/v1/kv_connector/nixl_integration/toy_proxy_server.py`. The validated
+transport is NIXL's default CUDA-buffer path; CPU staging was not needed.
+
+P must use `max_num_batched_tokens=512`: its eager default 8192-token forward
+exceeded the TP worker RPC watchdog on a 1499-token request. D needs admission
+headroom (`max_num_seqs=64` for the eight-stream benchmark), otherwise the
+injected request waits behind occupied decode slots and its reported TTFT is a
+scheduler-queue artifact. The harness performs a same-shape warmup outside the
+measurement interval.
+
+| metric | E48 monolithic TP=4 | E56 NIXL 1P1D |
+|---|---:|---:|
+| steady decode aggregate tok/s | about 54 | 23.50 |
+| before-injection ITL p50 / p95 ms | 146.3 / 147.6 | 221.41 / 297.67 |
+| during-injection ITL p50 / p95 ms | 278.7 / 6309.8 | 298.22 / 494.85 |
+| after-injection ITL p50 / p95 ms | — | 299.08 / 316.69 |
+| injected TTFT s | 19.124 | 26.582 |
+
+The transferred and direct greedy completions for the same deterministic
+1500-token prompt were byte-identical (423 bytes), proving KV plus Mamba state
+transfer correctness. Performance is nevertheless negative: P's eager GDN
+prefill saturates at approximately 85 prompt tok/s and a single long request
+needs 17.6–23.1 s before transfer/decode admission.
+
+Scale-out made this worse. Warmed 1P+2D at 16 streams achieved 12.72 tok/s and
+234.520 s injected TTFT (vs 23.50 tok/s and 26.582 s for 1P1D), so it fails the
+1.8x throughput and 1.5x TTFT gates. Do not run 1P+3D: NP=1 is prefill-bound.
+The allowed 2P+2D fallback was attempted with serial startup, but P1 on dies
+12–15 never reached HTTP readiness after loading; it repeatedly stalled in the
+shared-memory broadcast path. No 2P+2D benchmark exists. Full evidence is in
+E55–E58 of `tools/maxwell/evo/JOURNAL.md`.
+
 ## Why the GGUF needs rewriting (`fix_gguf.py`)
 
 llama.cpp's Qwen3.5 conversion applies three transforms that vLLM does not
@@ -76,7 +132,7 @@ original session):
 |----|------|--------------|---------------------|------------------|---------|
 | 2  | 2    | 8.3          | 10.3                | —                | —       |
 | 4  | 4    | 12.1         | **18.5** (best/die) | 4.4              | 149 s   |
-| 8  | 8    | 10.7         | 14.5                | 2.2              | 1366 s  |
+| 8  | 8    | 10.7         | 14.5                | 2.2              | 1366 s |
 | 16 | 16   | 6.0          | **23.5** (new best) | 3.9              | 869 s   |
 
 \* eager from the pre-SSD session; retest control/treatment reproduced (TP=4-CG
@@ -84,7 +140,7 @@ original session):
 
 Extra probes (2026-07-05, TP=4 + graphs):
 - **Placement is a non-lever**: spread `CUDA_VISIBLE_DEVICES=0,4,8,12` (one die
-  per board) ≈ packed `0,1,2,3` — 18.6 vs 18.5 batch, 4.5 vs 4.4 single-stream.
+  per board) ≈ packed `CUDA_VISIBLE_DEVICES=0,1,2,3` — 18.6 vs 18.5 batch, 4.5 vs 4.4 single-stream.
 - **Plain-quant in_proj still broken**: `BENCH_MODEL=…/Qwen3.5-9B-FIXED.gguf`
   runs at 17.8 tok/s but emits gibberish (see `fix_gguf.py` section above).
 
