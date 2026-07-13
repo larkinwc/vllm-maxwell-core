@@ -531,3 +531,20 @@ budget with non-regressed steady decode and reduces during-prefill ITL p95 to
 6.31 s, versus 15.57 s and 18.44 s for 2048/8192. The recommendation was
 written to tools/maxwell/README.md.
 
+
+
+## E49 — automatic prefix caching check (2026-07-12)
+
+Enabled prefix caching at the selected 512 token budget. Startup confirmed
+Mamba prefix caching in align mode. Three serial injected prompts shared the
+same approximately 1024-token prefix. Per-submission TTFT was **19.948 s**,
+then **2.373 s** and **2.372 s**, confirming the expected cache hit on repeats.
+The initial request remains decode-priority-starved; APC is a repeated-prefill
+latency feature, not a remedy for first-request TTFT.
+
+The APC TP=4 CUDA-graph decode ladder stayed non-regressing and coherent:
+b8 **49.1 tok/s**, b16 **50.7 tok/s**, with output beginning Paris. The
+sidecar remained active under the champion environment. APC is therefore a
+recommend-only launch option for workloads with repeated long prefixes; it
+does not change the decode token-budget recommendation.
+
