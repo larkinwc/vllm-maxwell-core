@@ -616,3 +616,49 @@ DeepSeek-V2-Lite is blocked by missing `deepseek2` GGUF architecture support.
 Therefore there is no valid new-family ladder or quant-sidecar regression
 result to report; the existing Qwen3.5-9B champion is the only fully supported
 candidate under this branch's `sm_50` constraints.
+
+
+## E54 — speculative decoding evaluation (2026-07-12)
+
+Evaluated the zero-model ngram proposer and the native Qwen3.5 MTP path with
+the TP=4 champion environment, `Qwen3.5-9B-FIXED.gguf`, CUDA graphs, greedy
+128-token decode, and the b1/b8 ladder. Ngram configuration uses
+`spec_method="ngram"`, one speculative token, and
+`speculative_config={"prompt_lookup_max": 4}`; `prompt_lookup_max` is nested
+because it is not a flat `EngineArgs` field.
+
+The initial ngram launch exposed a missing optional runtime dependency:
+`vllm.v1.spec_decode.ngram_proposer` imports `numba`. Installed the branch's
+pinned `numba==0.65.0` (and compatible `llvmlite==0.47.0`) in the isolated
+benchmark environment. Runtime verification after installation reported
+`numpy=2.3.5`, `numba=0.65.0`, and the existing vLLM build imported successfully.
+
+The completed ngram run loaded the drafter, retained the sidecar and CUDA-graph
+path, and produced coherent output beginning `Paris.`. It also explicitly
+disabled asynchronous scheduling, which this branch does not support with
+ngram speculation. Results were:
+
+| configuration | b1 tok/s | b8 aggregate tok/s | coherence |
+|---|---:|---:|---|
+| E44 champion baseline | 16.8 | 49.3 | pass |
+| ngram, max lookup 4, one token | 9.9 | 45.5 | pass |
+
+Ngram fails the b1 admission gate: 9.9 tok/s is well below both the 16.8 tok/s
+champion and the required +10% threshold (18.5 tok/s). It is also a b8
+regression. The failed first run's flat `prompt_lookup_max` argument and missing
+`numba` dependency were corrected before this final measurement; the table is
+from the successfully initialized engine.
+
+The native MTP configuration (`spec_method="mtp"`, one speculative token) was
+then attempted because the Qwen3.5 HF configuration advertises one MTP layer.
+Configuration validation rejected it before engine startup with:
+
+```text
+ValueError: GGUF model with architecture qwen35 is not supported yet.
+```
+
+Thus MTP is not available for this GGUF target in the current branch. Neither
+option has performance headroom; no external drafter was benchmarked because
+there is no positive b1 result or acceptance-rate evidence to justify consuming
+additional model memory. Keep speculative decoding disabled for the champion
+serving configuration.
