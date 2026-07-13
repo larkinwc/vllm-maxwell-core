@@ -741,3 +741,114 @@ static __global__ void mul_mat_vec_q6_K_v3(
         }
     }
 }
+
+#if defined(V3_CHUNK128) && V3_CHUNK128
+template <int NC>
+static __global__ void mul_mat_vec_q4_K_v3_chunk128(
+        const void * __restrict__ vx, const half * __restrict__ X,
+        void * __restrict__ dst_v, const int ncols, const int nrows) {
+    __half * dst = (__half *) dst_v;
+    constexpr int PITCH = NC + 1;
+    __shared__ __align__(16) float xs[128 * PITCH];
+    const int warp = threadIdx.x / 32;
+    const int lane = threadIdx.x % 32;
+    const int il = lane / 8;
+    const int ir = lane % 8;
+    const int c0 = 64 * il + 4 * ir;
+    const int row0 = V3_ROWS * blockIdx.x;
+    const int blocks_per_row = ncols / QK_K;
+    const block_q4_K * x = (const block_q4_K *) vx;
+    float acc[V3_RPW][NC];
+#pragma unroll
+    for (int k = 0; k < V3_RPW; ++k)
+#pragma unroll
+        for (int j = 0; j < NC; ++j) acc[k][j] = 0.0f;
+    for (int ib = 0; ib < blocks_per_row; ++ib) {
+        const int col0 = ib * QK_K;
+#pragma unroll
+        for (int part = 0; part < 2; ++part) {
+            __syncthreads();
+#pragma unroll
+            for (int j = 0; j < NC; ++j) {
+#pragma unroll
+                for (int cc = 0; cc < 128; cc += V3_THREADS) {
+                    const int c = cc + threadIdx.x;
+                    if (c < 128) {
+                        xs[c * PITCH + j] = __half2float(
+                            X[j * ncols + col0 + part * 128 + c]);
+                    }
+                }
+            }
+            __syncthreads();
+            if (il / 2 == part) {
+                float wlo[V3_RPW][4];
+                float whi[V3_RPW][4];
+#pragma unroll
+                for (int k = 0; k < V3_RPW; ++k) {
+                    const int row = row0 + warp + V3_NWARP * k;
+                    if (row >= nrows) {
+#pragma unroll
+                        for (int l = 0; l < 4; ++l) {
+                            wlo[k][l] = 0.0f;
+                            whi[k][l] = 0.0f;
+                        }
+                        continue;
+                    }
+                    const block_q4_K * bq = x + row * blocks_per_row + ib;
+                    const uint8_t * q = bq->qs + 32 * il + 4 * ir;
+#if defined(V3_Q4VEC) && V3_Q4VEC
+                    const uint32_t qword = V3_LOAD(reinterpret_cast<const uint32_t *>(q));
+#endif
+                    const half2 dm = V3_LOAD(&bq->dm);
+                    const float dall = __low2float(dm);
+                    const float dmin = __high2float(dm);
+                    uint8_t sc, m;
+                    get_scale_min_k4(2 * il + 0, bq->scales, sc, m);
+                    const float d1 = dall * sc;
+                    const float m1 = dmin * m;
+                    get_scale_min_k4(2 * il + 1, bq->scales, sc, m);
+                    const float d2 = dall * sc;
+                    const float m2 = dmin * m;
+#pragma unroll
+                    for (int l = 0; l < 4; ++l) {
+#if defined(V3_Q4VEC) && V3_Q4VEC
+                        const uint8_t qv = V3_Q4_BYTE(qword, l);
+#else
+                        const uint8_t qv = V3_LOAD(&q[l]);
+#endif
+                        wlo[k][l] = d1 * (qv & 0xF) - m1;
+                        whi[k][l] = d2 * (qv >> 4) - m2;
+                    }
+                }
+#pragma unroll
+                for (int l = 0; l < 4; ++l) {
+                    const float * xlo = &xs[(c0 - part * 128 + l) * PITCH];
+                    const float * xhi = &xs[(c0 - part * 128 + 32 + l) * PITCH];
+#pragma unroll
+                    for (int j = 0; j < NC; ++j) {
+                        const float xl = xlo[j];
+                        const float xh = xhi[j];
+#pragma unroll
+                        for (int k = 0; k < V3_RPW; ++k) {
+                            acc[k][j] += wlo[k][l] * xl + whi[k][l] * xh;
+                        }
+                    }
+                }
+            }
+        }
+    }
+#pragma unroll
+    for (int k = 0; k < V3_RPW; ++k) {
+        const int row = row0 + warp + V3_NWARP * k;
+#pragma unroll
+        for (int j = 0; j < NC; ++j) {
+            float t = acc[k][j];
+#pragma unroll
+            for (int mask = 16; mask > 0; mask >>= 1) {
+                t += __shfl_xor_sync(0xffffffff, t, mask, 32);
+            }
+            if (lane == 0 && row < nrows) dst[j * nrows + row] = __float2half(t);
+        }
+    }
+}
+#endif

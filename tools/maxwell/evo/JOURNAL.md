@@ -484,3 +484,22 @@ q4_K b8 block limits are:
 The two new engine runs were coherent with CUDA graphs: 64x4 b8/b16 =
 35.0/29.7 and 64x8 = 42.0/35.4 tok/s. At b8, 128x8 is a seven-block smem/register tie; however b16 is a residency cliff: xs=17,408 B limits 128x8 to three blocks/SMM while its q4_K register footprint permits six. The V3_CHUNK=128 b16 probe is therefore authorized and remains the next open Arc C experiment; 128x8 remains the current champion pending that gate.
 
+
+
+### E47 addendum — q4_K V3_CHUNK128 b16 residency probe
+
+The b16 shared-memory cliff was tested with a default-off, q4_K-only
+MAXWELL_EVO_V3_CHUNK128 path. It stages 128 columns at a time (8,704 B at
+b16) and dispatches only q4_K through the reduced-stage kernel; q6_K/q8_0
+remain on the proven 256-column kernels for this fail-fast probe.
+
+The variant compiled, passed EVO_TEST_MAX_REL=0.05 SIDECAR_TEST PASS, and
+produced coherent CUDA-graph output beginning Paris. Its q4_K MMV3 b8
+microbench regressed from the 2.586 ms anchor to **4.751 ms**. The direct
+b16 engine read was **43.5 tok/s**, versus the E44 b16 anchor **50.9 tok/s**.
+
+**SHELVED:** while halving the q4 shared stage makes the expected b16
+residency available, the extra staging/unpack synchronization overwhelms that
+benefit. Do not extend CHUNK128 to q6_K/q8_0; retain default 0 and 128x8
+256-column staging as champion.
+

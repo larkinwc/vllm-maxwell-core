@@ -313,8 +313,13 @@ static void launch_v3(const void* w, const at::Half* x, void* y, int type,
   const half* x_off = (const half*)x + (size_t)j0 * cols;
   void* y_off = (char*)y + (size_t)j0 * y_rows * 2;
   if (type == 12) {
+#if defined(V3_CHUNK128) && V3_CHUNK128
+    mul_mat_vec_q4_K_v3_chunk128<NC><<<grid, block, 0, stream>>>(
+        w, x_off, y_off, cols, rows);
+#else
     mul_mat_vec_q4_K_v3<NC><<<grid, block, 0, stream>>>(
         w, x_off, y_off, cols, rows);
+#endif
   } else if (type == 14) {
     mul_mat_vec_q6_K_v3<NC><<<grid, block, 0, stream>>>(
         w, x_off, y_off, cols, rows);
