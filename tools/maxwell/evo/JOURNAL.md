@@ -548,3 +548,23 @@ sidecar remained active under the champion environment. APC is therefore a
 recommend-only launch option for workloads with repeated long prefixes; it
 does not change the decode token-budget recommendation.
 
+
+
+## E50 — TP all-reduce transfer audit (2026-07-12)
+
+Followed the TP=4 fallback from cuda_communicator.py. The startup line
+Using [] all-reduce backends refers only to optional accelerated backends
+(NCCL symmetric memory, quick-reduce, FlashInfer, custom, and symmetric-memory),
+not to a host-staged reduction path. At TP world size >1 the communicator first
+constructs PyNcclCommunicator; when that optional wrapper is disabled, all_reduce
+clones the device tensor and calls torch.distributed.all_reduce(out,
+group=self.device_group). The normal PyNccl path likewise passes device pointers
+directly to ncclAllReduce.
+
+No cudaHostAlloc, pin_memory, pageable CPU buffer, or host-copy staging exists
+in this fallback. The observed [] log therefore does not authorize a pinned
+staging prototype: reduction is already handled by NCCL/PyTorch's device-group
+path. No vllm/ edit was made. The b1 host-time observation from E9 remains a
+profiling target, but it is not evidence of an application-owned pageable
+all-reduce buffer.
+
