@@ -694,3 +694,51 @@ contained all required standing checks: `Platform plugin maxwell is activated`,
 `Capturing CUDA graphs (decode, FULL)`, and `Kernel JIT monitor activated`.
 The server was stopped after the check. These results clear NIXL installation,
 DS-layout coherence, and serve translation prerequisites for 1P1D bring-up.
+
+
+## E56 — NIXL 1P1D disaggregated serving (2026-07-12)
+
+Brought up one NIXL prefill producer on dies 0–3 (HTTP 8100, side channel
+5559), one CUDA-graph decode consumer on dies 4–7 (HTTP 8200, side channel
+5659), and the repository's unmodified toy proxy on 8192. Both engines used
+the champion environment and mandatory `VLLM_SSM_CONV_STATE_LAYOUT=DS`. The
+validated transport is NIXL's default CUDA-buffer path, not CPU staging.
+
+Two serving corrections were necessary for a valid measurement. Eight persistent
+streams require decode admission headroom, so D uses `max_num_seqs=64` rather
+than eight; otherwise the injected request waits for a stream slot and measures
+scheduler queueing rather than transfer TTFT. P's eager default 8192-token
+forward also exceeded the TP worker RPC watchdog for a 1499-token request
+(`sample_tokens` timed out after repeated 60-second shared-memory waits), so P
+uses `max_num_batched_tokens=512` to chunk that request. A same-shape warmup
+(proxy short streams plus a long transfer) runs outside the timing interval.
+
+The proxy coherence smoke returned `Paris.`. Under the corrected configuration,
+a fixed 1500-token synthetic prompt was sent directly to D (local prefill) and
+through P/proxy/D (remote KV plus hybrid SSM state); greedy, non-streaming
+64-token completions were byte-identical (423 completion bytes). Decode logs
+recorded NIXL compatibility checks, TP=4 transfer plans, successful CUDA
+transfers, and external-prefix-cache use. This establishes that KV and Mamba
+state transfer correctly with DS layout and that the proxy path does not
+re-prefill the transferred request.
+
+The E48-comparable warmed mixed benchmark used eight 256-token proxy streams
+and a 1500-token injected request at 5 s:
+
+| metric | E48 monolithic TP=4 | E56 NIXL 1P1D |
+|---|---:|---:|
+| steady decode aggregate tok/s | about 54 | 23.50 |
+| before-injection ITL p50 / p95 ms | 146.3 / 147.6 | 221.41 / 297.67 |
+| during-injection ITL p50 / p95 ms | 278.7 / 6309.8 | 298.22 / 494.85 |
+| after-injection ITL p50 / p95 ms | — | 299.08 / 316.69 |
+| injected TTFT s | 19.124 | 26.582 |
+
+All coherence snippets were clean. The run avoids E48's 6309.8 ms
+prefill-contention spike, but fails this plan's 250 ms during-ITL p95, 9.5 s
+TTFT, and 45 tok/s aggregate gates; it is also slower than E48 on TTFT,
+aggregate decode throughput, and ordinary ITL. The dedicated eager GDN prefill
+lane is compute-bound on this PCIe sm_50 system (its validated direct
+1500-token request completed at 82.30 tok/s, 18.227 s). Therefore 1P1D is a
+correctness success but a negative serving-performance result, not an admitted
+launch recipe. The next measurements characterize the producer and determine
+whether additional decode lanes have any useful scaling headroom.
