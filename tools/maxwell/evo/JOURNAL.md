@@ -662,3 +662,35 @@ option has performance headroom; no external drafter was benchmarked because
 there is no positive b1 result or acceptance-rate evidence to justify consuming
 additional model memory. Keep speculative decoding disabled for the champion
 serving configuration.
+
+
+## E55 — disaggregated serving prerequisites (2026-07-12)
+
+Installed `nixl==1.3.1` (including its CUDA 12 wheel) in the Maxwell benchmark
+environment. `from vllm.distributed.nixl_utils import NixlWrapper` succeeded and
+reported `NIXL is available`; the existing `numpy` version remains `2.3.5`.
+
+Re-ran the TP=4 champion decode ladder with the required
+`VLLM_SSM_CONV_STATE_LAYOUT=DS` setting, CUDA graphs, and the full champion
+environment. Coherence passed (`Paris.`) and the measured output throughput was:
+
+| batch | DS tok/s | prior anchor tok/s | delta tok/s |
+|---:|---:|---:|---:|
+| 1 | 16.8 | 16.8 | 0.0 |
+| 8 | 49.2 | 49.3 | -0.1 |
+| 16 | 49.1 | 50.9 | -1.8 |
+
+The E48-era b16 anchor recorded in the disaggregation plan was an offline
+`max_num_seqs=16` reference, while this reusable ladder remains configured with
+`max_num_seqs=8`; its throughput is saturated at the b8 value. The DS layout is
+therefore coherent and preserves the champion's admitted b8 decode rate, but a
+like-for-like b16 comparison requires a `max_num_seqs=16` run before treating
+b16 as an admission gate.
+
+The monolithic OpenAI-server smoke used TP=4 on dies 0–3, DS layout, a 512-token
+batch budget, and `{"mode": 0, "cudagraph_mode": "FULL"}`. It returned the
+greedy completion `Paris.` for `The capital of France is`. The server log
+contained all required standing checks: `Platform plugin maxwell is activated`,
+`Capturing CUDA graphs (decode, FULL)`, and `Kernel JIT monitor activated`.
+The server was stopped after the check. These results clear NIXL installation,
+DS-layout coherence, and serve translation prerequisites for 1P1D bring-up.
