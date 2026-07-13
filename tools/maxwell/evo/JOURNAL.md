@@ -742,3 +742,55 @@ lane is compute-bound on this PCIe sm_50 system (its validated direct
 correctness success but a negative serving-performance result, not an admitted
 launch recipe. The next measurements characterize the producer and determine
 whether additional decode lanes have any useful scaling headroom.
+
+
+## E57 — TP=4 prefill-producer capacity (2026-07-12)
+
+Measured direct, warmed 1500-token producer requests on P0 (port 8100) with
+chunked eager prefill (`max_num_batched_tokens=512`):
+
+| concurrent requests | aggregate prefill tok/s | wall s |
+|---:|---:|---:|
+| 1 | 64.85 | 23.131 |
+| 2 | 84.73 | 35.406 |
+| 4 | 85.06 | 70.542 |
+
+The producer saturates at about 85 prompt tok/s. A single long request therefore
+has a 17.6–23.1 s prefill service time, already above the 9.5 s TTFT gate before
+transfer and decode admission. The 2/4-concurrency plateau makes a single P a
+likely bottleneck for a many-decoder topology, but it does have enough aggregate
+prompt work to make the prescribed 1P+2D throughput probe informative. Proceed
+to that probe; do not expect added decode lanes to repair the per-request TTFT.
+
+
+## E58 — xPyD scale-out and 2P2D fallback (2026-07-13)
+
+The aggregate ladder is negative on this PCIe sm_50 host:
+
+| topology | streams | aggregate tok/s | injected TTFT s | during ITL p95 ms | outcome |
+|---|---:|---:|---:|---:|---|
+| 1P1D | 8 | 23.50 | 26.582 | 494.85 | E56 baseline, fails admission gates |
+| 1P2D | 16 | 12.72 | 234.520 | 494.84 | fails 1.8x scale and 1.5x TTFT gates |
+| 1P3D | — | — | — | — | not run: NP=1 is decisively prefill-bound |
+| 2P2D | 16 | — | — | — | could not initialize P1; no benchmark result |
+
+The warmed 1P2D proxy used matched prefill/decoder host-port lists and two
+CUDA-graph decode consumers, so its regression is not the earlier proxy
+argument error. It achieves only 0.54x of the single-D aggregate while TTFT is
+8.8x worse. This confirms the E57 single-producer saturation result: adding
+decode capacity cannot improve a producer-bound topology.
+
+Per the contingency for a 1P2D TTFT failure, attempted 2P2D with P0=0-3,
+D0=4-7, D1=8-11, P1=12-15 and serial engine startup to avoid competing model
+loads. P0, D0, and D1 reached their endpoints. P1 loaded the 1.48 GiB model in
+344.8 s, then repeatedly logged `No available shared memory broadcast block
+found in 60 seconds`; its HTTP endpoint never became ready within the 600 s
+launch gate. The four residual P1 workers were explicitly killed and the final
+`nvidia-smi --query-compute-apps=pid --format=csv,noheader` check was empty.
+
+There is no validated 2P2D measurement and no passing topology. The recommended
+result is therefore **do not deploy NIXL P/D disaggregation on this Maxwell
+PCIe sm_50 host**. Keep the E48 monolithic TP=4 serving recipe; disaggregation
+is transfer-correct but cannot meet throughput or TTFT goals because eager GDN
+prefill is slow and the full 16-die fallback cannot bring up its second
+producer reliably.
