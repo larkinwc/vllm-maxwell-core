@@ -503,3 +503,31 @@ residency available, the extra staging/unpack synchronization overwhelms that
 benefit. Do not extend CHUNK128 to q6_K/q8_0; retain default 0 and 128x8
 256-column staging as champion.
 
+
+
+## E48 — token-budget mixed decode/prefill sweep (2026-07-12)
+
+Added standalone $HOME/bench_ssd/evo/mixed_bench.py using AsyncLLMEngine with
+the TP=4 champion construction. It runs eight concurrent 128-token greedy
+decode streams, injects an approximately 1500-token prompt after five seconds,
+and captures per-stream ITL plus injected-request TTFT. Every run used the
+champion MAXWELL_EVO sidecar environment and retained CUDA graph capture.
+
+| max_num_batched_tokens | before ITL p50/p95 | during ITL p50/p95 | after ITL p50/p95 | injected TTFT |
+|---:|---|---|---|---:|
+| 512 | 146.34 / 147.60 ms | 278.73 / 6309.80 ms | 147.78 / 149.02 ms | 19.124 s |
+| 2048 | 146.74 / 148.01 ms | 278.46 / 15573.30 ms | 148.03 / 149.05 ms | 18.574 s |
+| 8192 | 147.84 / 149.35 ms | 278.82 / 18436.27 ms | 148.20 / 149.37 ms | 18.632 s |
+
+Steady decode cadence is equivalent across the sweep: a roughly 147--149 ms
+per-stream ITL corresponds to approximately 54 aggregate tok/s for eight
+streams, above the 49.3 b8 anchor. The harness's whole-run decode_tok_s is not
+used for this comparison because it includes the intentional prefill stall.
+TTFT remains around 19 s across budgets, showing decode-priority starvation
+rather than a budget-sensitive prefill win.
+
+**Serving recommendation: max_num_batched_tokens=512.** It is the smallest
+budget with non-regressed steady decode and reduces during-prefill ITL p95 to
+6.31 s, versus 15.57 s and 18.44 s for 2048/8192. The recommendation was
+written to tools/maxwell/README.md.
+

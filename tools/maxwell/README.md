@@ -19,6 +19,14 @@ The model must be loaded with the **text-only** class via
 `hf_overrides={"architectures": ["Qwen3_5ForCausalLM"]}` plus the HF tokenizer /
 config from `Qwen/Qwen3.5-9B`. See `tp_bench.py` for the exact `LLM(...)` args.
 
+## Decode serving budget
+
+For the TP=4 Maxwell decode pool, launch with max_num_batched_tokens=512.
+E48 mixed-load validation found that all tested budgets retained champion-level
+steady decode cadence, while 512 minimized the decode ITL p95 during a 1500-token
+prefill injection. This is a decode-pool serving choice; it is not a prefill/TTFT
+optimization.
+
 ## Why the GGUF needs rewriting (`fix_gguf.py`)
 
 llama.cpp's Qwen3.5 conversion applies three transforms that vLLM does not
